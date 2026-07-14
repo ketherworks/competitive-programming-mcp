@@ -7,10 +7,17 @@
   "bin": {
     "nowcoder-mcp-server": "dist/index.js"
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist/index.js",
+    "dist/index.js.map",
+    "dist/index.d.ts",
+    "dist/index.d.ts.map",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "clean": "node scripts/clean.mjs",
-    "build": "npm run clean && tsc -b tsconfig.json && node scripts/prepare-bin.mjs",
+    "build": "npm run clean && tsc -b tsconfig.json && node ../../scripts/bundle-platform.mjs nowcoder && node scripts/prepare-bin.mjs",
     "typecheck": "npm run clean && tsc -b tsconfig.json",
     "typecheck:test": "npm run typecheck && tsc -p tsconfig.test.json",
     "prepack": "npm run build && node scripts/verify-package.mjs",
@@ -19,8 +26,6 @@
     "test": "vitest run --config vitest.config.ts test"
   },
   "dependencies": {
-    "@kaiserunix/oj-mcp-contracts": "0.1.0",
-    "@kaiserunix/oj-mcp-server-common": "0.1.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "zod": "4.3.6"
   },

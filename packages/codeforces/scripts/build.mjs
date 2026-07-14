@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { chmod, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { bundlePlatform } from "../../../scripts/bundle-platform.mjs";
 
 const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const distDir = join(packageDir, "dist");
@@ -16,4 +17,5 @@ const tsc = require.resolve("typescript/bin/tsc");
 const result = spawnSync(process.execPath, [tsc, "-b"], { cwd: packageDir, stdio: "inherit" });
 if (result.status !== 0) throw new Error(`TypeScript build failed with status ${result.status}`);
 
+await bundlePlatform("codeforces");
 await chmod(join(distDir, "index.js"), 0o755);

@@ -204,6 +204,18 @@ function capability(name: OjCapabilityName, checkedAt: string, transport: OjCapa
       checkedAt
     };
   }
+  if (name === "fetchProfile" || name === "listSubmissions") {
+    return {
+      name,
+      status: "unsupported",
+      transport,
+      auth: "none",
+      risk: "R0_public_read",
+      compliance: "official",
+      reason: "The official API exposes this data, but it is outside this adapter's audited surface.",
+      checkedAt
+    };
+  }
   return {
     name,
     status: "unsupported",

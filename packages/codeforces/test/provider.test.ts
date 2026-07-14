@@ -12,6 +12,17 @@ describe("CodeforcesProvider health", () => {
     }
   });
 
+  test("describes audited scope limits without denying official API capabilities", async () => {
+    const provider = new CodeforcesProvider({ nowIso: () => "2026-07-10T12:00:00.000Z" });
+    const capabilities = await provider.getCapabilities("remote_http");
+
+    for (const name of ["fetchProfile", "listSubmissions"] as const) {
+      expect(capabilities.operations[name]).toMatchObject({ status: "unsupported" });
+      expect(capabilities.operations[name].reason).toContain("adapter's audited surface");
+      expect(capabilities.operations[name].reason).not.toContain("official API does not expose");
+    }
+  });
+
   test("maps persisted timeout, rate-limit, drift, and recovery observations", async () => {
     const cases = [
       {
