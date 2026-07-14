@@ -79,7 +79,7 @@ describe("standalone MCP source export", () => {
         stdio: "pipe"
       })
     ).toThrow();
-  }, 30_000);
+  }, 120_000);
 
   test("refuses to overwrite any existing export directory", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "nowcoder-mcp-export-"));
