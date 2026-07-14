@@ -356,6 +356,28 @@ describe("NowCoder submission controller", () => {
     await expect(service.preparePlatformRun(run)).rejects.toMatchObject({ code: "policy.blocked" });
     await expect(first).resolves.toMatchObject({ requestId: "run-concurrent" });
   });
+
+  test("releases a platform-run requestId after a definite pre-dispatch token failure", async () => {
+    const gateway = gatewayFixture();
+    gateway.obtainAccessToken.mockRejectedValueOnce(new NowCoderAdapterError("auth.invalid", "expired"));
+    const service = new NowCoderJudgeService({ gateway, verifyArtifact });
+    const prepared = request();
+    const run: OjRunRequest = {
+      schemaVersion: "oj.run-request/v1",
+      requestId: "run-token-failure",
+      attemptId: "attempt-1",
+      problem: prepared.problem,
+      mode: "platform",
+      code: prepared.code,
+      sampleOrdinals: [1],
+      limits: { wallTimeMs: 32_000, outputBytes: 1_048_576, network: "deny" }
+    };
+    const preview = await service.preparePlatformRun(run);
+
+    await expect(service.commitPlatformRun(preview.intentId, true)).rejects.toMatchObject({ code: "auth.invalid" });
+    await expect(service.preparePlatformRun(run)).resolves.toMatchObject({ requestId: "run-token-failure" });
+    expect(gateway.submit).not.toHaveBeenCalled();
+  });
 });
 
 function gatewayFixture(): NowCoderJudgeGateway & {

@@ -440,7 +440,8 @@ export class NowCoderJudgeService {
     try {
       token = await this.gateway.obtainAccessToken(intent.preparation.teamId, signal);
     } catch (error) {
-      intent.phase = "prepared";
+      this.runIntents.delete(intentId);
+      this.reservedRunRequestIds.delete(intent.request.requestId);
       throw error;
     }
     intent.phase = "consumed";
