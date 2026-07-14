@@ -19,9 +19,11 @@ describe("Luogu package deployment metadata", () => {
     };
 
     expect(wrangler.main).toBe("dist/worker.js");
-    expect(packageJson.files).toContain("dist");
+    expect(packageJson.files).toContain("dist/index.js");
     expect(packageJson.files).toContain("wrangler.jsonc");
-    expect(packageJson.scripts.build).toBe("tsc -b && node scripts/ensure-cli-mode.mjs");
+    expect(packageJson.scripts.build).toBe(
+      "tsc -b && node ../../scripts/bundle-platform.mjs luogu && node scripts/ensure-cli-mode.mjs"
+    );
     expect(packageJson.scripts.clean).toBe("node scripts/clean.mjs");
     expect(packageJson.scripts.prepack).toBe("npm run clean && npm run build");
     expect(packageJson.scripts.prepublishOnly).toBe("node scripts/check-publish-platform.mjs");
@@ -32,11 +34,14 @@ describe("Luogu package deployment metadata", () => {
   test("inspects the compiled CLI and Worker artifacts produced before tests", async () => {
     const cli = await readFile(new URL("../dist/index.js", import.meta.url), "utf8");
     const worker = await readFile(new URL("../dist/worker.js", import.meta.url), "utf8");
+    const workerModule = (await import(`${new URL("../dist/worker.js", import.meta.url).href}?test=${Date.now()}`)) as {
+      default: { fetch?: unknown };
+    };
 
     expect(cli.startsWith("#!/usr/bin/env node")).toBe(true);
     expect(cli).toContain("StdioServerTransport");
     expect(worker).toContain("WebStandardStreamableHTTPServerTransport");
-    expect(worker).toContain("export default worker");
+    expect(workerModule.default.fetch).toBeTypeOf("function");
   });
 
   test("ships the CLI entrypoint as POSIX 0755 in npm pack metadata", async () => {
@@ -80,6 +85,39 @@ describe("Luogu package deployment metadata", () => {
     expect(readme).toContain("cross-client ID collisions");
     expect(readme).toMatch(/bounded timeout and admission\s+controls remain active/);
     expect(readme).toContain("https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation");
+  });
+
+  test("ships without unpublished workspace runtime dependencies", async () => {
+    const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
+      dependencies: Record<string, string>;
+    };
+    const cli = await readFile(new URL("../dist/index.js", import.meta.url), "utf8");
+    const worker = await readFile(new URL("../dist/worker.js", import.meta.url), "utf8");
+
+    expect(Object.keys(manifest.dependencies).filter((name) => name.startsWith("@kaiserunix/oj-mcp-"))).toEqual([]);
+    expect(cli).not.toContain("@kaiserunix/oj-mcp-");
+    expect(worker).not.toContain("@kaiserunix/oj-mcp-");
+  });
+
+  test("publishes only supported bundled entrypoints", async () => {
+    const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
+      files: string[];
+    };
+
+    expect(manifest.files).toEqual([
+      "dist/index.js",
+      "dist/index.js.map",
+      "dist/index.d.ts",
+      "dist/index.d.ts.map",
+      "dist/worker.js",
+      "dist/worker.js.map",
+      "dist/worker.d.ts",
+      "dist/worker.d.ts.map",
+      "wrangler.jsonc",
+      "README.md",
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md"
+    ]);
   });
 });
 

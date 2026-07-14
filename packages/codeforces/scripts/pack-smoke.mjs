@@ -23,6 +23,8 @@ try {
     "dist/index.d.ts",
     "dist/worker.js",
     "dist/worker.d.ts",
+    "dist/coordinator.d.ts",
+    "dist/coordinator.d.ts.map",
     "wrangler.jsonc",
     "README.md",
     "LICENSE",
@@ -51,6 +53,7 @@ try {
   const archive = join(temporary, report.filename);
   run("tar", ["-xzf", archive, "-C", temporary]);
   const extracted = join(temporary, "package");
+  await assertRelativeDeclarationTargets(join(extracted, "dist", "worker.d.ts"));
   await smokeCli(extracted);
   await smokeWorker(extracted);
   process.stdout.write(`pack smoke passed: ${report.filename} (${report.entryCount} files), CLI and Worker verified\n`);
@@ -163,6 +166,21 @@ async function expectMissing(path) {
     return;
   }
   throw new Error(`${path} survived the clean build`);
+}
+
+async function assertRelativeDeclarationTargets(declarationPath) {
+  const source = await readFile(declarationPath, "utf8");
+  const specifiers = [...source.matchAll(/(?:from|import)\s*[(']?\s*["'](\.[^"']+)["']/g)].map(
+    (match) => match[1]
+  );
+  for (const specifier of specifiers) {
+    const declarationTarget = specifier.endsWith(".js") ? `${specifier.slice(0, -3)}.d.ts` : specifier;
+    try {
+      await access(join(dirname(declarationPath), declarationTarget));
+    } catch {
+      throw new Error(`packed declaration ${declarationPath} references missing ${declarationTarget}`);
+    }
+  }
 }
 
 function run(command, args, options = {}) {

@@ -51,6 +51,36 @@ describe("Codeforces package lifecycle", () => {
     await expect(access(new URL("../LICENSE", import.meta.url))).resolves.toBeUndefined();
   });
 
+  test("ships without unpublished workspace runtime dependencies", async () => {
+    const packageJson = await readJson("package.json");
+    const dependencies = packageJson.dependencies as Record<string, string>;
+    const cli = await readFile(new URL("../dist/index.js", import.meta.url), "utf8");
+    const worker = await readFile(new URL("../dist/worker.js", import.meta.url), "utf8");
+
+    expect(Object.keys(dependencies).filter((name) => name.startsWith("@kaiserunix/oj-mcp-"))).toEqual([]);
+    expect(cli).not.toContain("@kaiserunix/oj-mcp-");
+    expect(worker).not.toContain("@kaiserunix/oj-mcp-");
+  });
+
+  test("publishes only supported bundled entrypoints", async () => {
+    const packageJson = await readJson("package.json");
+    expect(packageJson.files).toEqual([
+      "dist/index.js",
+      "dist/index.js.map",
+      "dist/index.d.ts",
+      "dist/index.d.ts.map",
+      "dist/worker.js",
+      "dist/worker.js.map",
+      "dist/worker.d.ts",
+      "dist/worker.d.ts.map",
+      "dist/coordinator.d.ts",
+      "dist/coordinator.d.ts.map",
+      "wrangler.jsonc",
+      "README.md",
+      "LICENSE"
+    ]);
+  });
+
   test("smokes the packed CLI and Worker entrypoints", () => {
     const result = spawnSync(process.execPath, ["scripts/pack-smoke.mjs"], {
       cwd: packageDir,

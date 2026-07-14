@@ -31,7 +31,7 @@ describe("AtCoder package deployment metadata", () => {
 
     expect(packageJson.scripts).toMatchObject({
       clean: "node scripts/clean.mjs",
-      build: "npm run clean && tsc -b",
+      build: "npm run clean && tsc -b && node ../../scripts/bundle-platform.mjs atcoder",
       postbuild: "node scripts/set-bin-mode.mjs",
       prepack: "npm run build",
       "deploy:cf": "npm run build && wrangler deploy"
@@ -116,7 +116,7 @@ describe("AtCoder package deployment metadata", () => {
 
     expect(wrangler.main).toBe("dist/worker.js");
     expect(wrangler.compatibility_flags).toEqual(expect.arrayContaining(["nodejs_compat"]));
-    expect(packageJson.files).toContain("dist/**/*.js");
+    expect(packageJson.files).toContain("dist/index.js");
     expect(packageJson.files).toContain("wrangler.jsonc");
   });
 
@@ -133,6 +133,42 @@ describe("AtCoder package deployment metadata", () => {
     expect(license).toContain("MIT License");
     expect(readme).toContain("anonymous read-only");
     expect(readme).toContain("No authentication, code execution, or submission tools");
+    expect(readme).toContain("Do not use this server during ongoing ABC, ARC, or AGC contests");
+    expect(readme).toContain("https://info.atcoder.jp/entry/llm-rules-en");
+    expect(readme).toContain("https://atcoder.jp/tos?lang=en");
+    expect(readme).toContain("unofficial and is not affiliated with or endorsed by AtCoder Inc.");
+  });
+
+  test("ships without unpublished workspace runtime dependencies", async () => {
+    const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
+      dependencies: Record<string, string>;
+    };
+    const cli = await readFile(new URL("../dist/index.js", import.meta.url), "utf8");
+    const worker = await readFile(new URL("../dist/worker.js", import.meta.url), "utf8");
+
+    expect(Object.keys(packageJson.dependencies).filter((name) => name.startsWith("@kaiserunix/oj-mcp-"))).toEqual([]);
+    expect(cli).not.toContain("@kaiserunix/oj-mcp-");
+    expect(worker).not.toContain("@kaiserunix/oj-mcp-");
+  });
+
+  test("publishes only supported bundled entrypoints", async () => {
+    const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
+      files: string[];
+    };
+
+    expect(packageJson.files).toEqual([
+      "dist/index.js",
+      "dist/index.js.map",
+      "dist/index.d.ts",
+      "dist/index.d.ts.map",
+      "dist/worker.js",
+      "dist/worker.js.map",
+      "dist/worker.d.ts",
+      "dist/worker.d.ts.map",
+      "wrangler.jsonc",
+      "LICENSE",
+      "README.md"
+    ]);
   });
 
   test("prepacks from absent dist and excludes source and compiler internals", { timeout: 30_000 }, async () => {
@@ -168,6 +204,8 @@ async function createPackSandbox(): Promise<string> {
   const repository = fileURLToPath(new URL("../../../", import.meta.url));
   const sandbox = await mkdtemp(join(tmpdir(), "atcoder-pack-"));
   await cp(join(repository, "tsconfig.base.json"), join(sandbox, "tsconfig.base.json"));
+  await mkdir(join(sandbox, "scripts"), { recursive: true });
+  await cp(join(repository, "scripts", "bundle-platform.mjs"), join(sandbox, "scripts", "bundle-platform.mjs"));
   for (const packageName of ["contracts", "server-common", "atcoder"]) {
     await cp(join(repository, "packages", packageName), join(sandbox, "packages", packageName), {
       recursive: true,
@@ -182,6 +220,7 @@ async function createPackSandbox(): Promise<string> {
   await linkPackage(packageRoot("parse5"), join(modules, "parse5"));
   await linkPackage(packageRoot("parse5-sax-parser"), join(modules, "parse5-sax-parser"));
   await linkPackage(packageRoot("entities"), join(modules, "entities"));
+  await linkPackage(packageRoot("esbuild"), join(modules, "esbuild"));
   await linkPackage(join(sandbox, "packages", "contracts"), join(modules, "@kaiserunix", "oj-mcp-contracts"));
   await linkPackage(join(sandbox, "packages", "server-common"), join(modules, "@kaiserunix", "oj-mcp-server-common"));
   await createTscLauncher(sandbox);

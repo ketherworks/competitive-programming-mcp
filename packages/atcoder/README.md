@@ -7,6 +7,18 @@ offers a problem API.
 No authentication, code execution, or submission tools are exposed. The adapter
 does not run solutions, read profiles, list submissions, or send code to AtCoder.
 
+## Contest And Content Policy
+
+Do not use this server during ongoing ABC, ARC, or AGC contests. AtCoder's current
+[rules against generative AI](https://info.atcoder.jp/entry/llm-rules-en) generally
+prohibit generative-AI use during those contests, apart from narrowly defined
+translation. This server is intended for practice with past problems.
+
+This adapter is unofficial and is not affiliated with or endorsed by AtCoder Inc.
+The MIT license covers this adapter's source code only. AtCoder problem statements
+and other service content remain subject to the rights and conditions described in
+the [AtCoder Terms of Use](https://atcoder.jp/tos?lang=en).
+
 ## Tools
 
 - `oj_capabilities`: reports the audited read surface and unsupported operations.

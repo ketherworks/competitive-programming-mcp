@@ -7,7 +7,21 @@
   "bin": {
     "codeforces-mcp-server": "dist/index.js"
   },
-  "files": ["dist", "wrangler.jsonc", "README.md", "LICENSE"],
+  "files": [
+    "dist/index.js",
+    "dist/index.js.map",
+    "dist/index.d.ts",
+    "dist/index.d.ts.map",
+    "dist/worker.js",
+    "dist/worker.js.map",
+    "dist/worker.d.ts",
+    "dist/worker.d.ts.map",
+    "dist/coordinator.d.ts",
+    "dist/coordinator.d.ts.map",
+    "wrangler.jsonc",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -b --pretty false",
@@ -20,8 +34,6 @@
     "deploy:cf:dry-run": "npm run build && wrangler deploy --dry-run"
   },
   "dependencies": {
-    "@kaiserunix/oj-mcp-contracts": "0.1.0",
-    "@kaiserunix/oj-mcp-server-common": "0.1.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "zod": "4.3.6"
   },
