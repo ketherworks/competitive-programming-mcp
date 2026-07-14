@@ -115,6 +115,22 @@ describe("Competitive Companion import", () => {
     await expect(fetch(window.endpoint!)).rejects.toBeDefined();
   });
 
+  test("reserves the listener before the asynchronous bind completes", async () => {
+    const importer = new CompetitiveCompanionImporter({ port: 0 });
+    importers.push(importer);
+    const request = {
+      schemaVersion: "oj.import-window-request/v1" as const,
+      requestId: "import-concurrent",
+      allowedPlatforms: ["nowcoder" as const],
+      expiresInMs: 10_000
+    };
+
+    const first = importer.open(request);
+    await expect(importer.open({ ...request, requestId: "import-concurrent-2" }))
+      .rejects.toMatchObject({ code: "policy.blocked" });
+    await expect(first).resolves.toMatchObject({ state: "waiting" });
+  });
+
   test("allows extension origins without using a wildcard", async () => {
     const importer = new CompetitiveCompanionImporter({ port: 0 });
     importers.push(importer);

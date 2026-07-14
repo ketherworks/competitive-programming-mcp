@@ -255,7 +255,13 @@ export function createNowCoderMcpServer(options: { provider?: NowCoderProvider }
         case "oj_platform_run": {
           const parsed = parseInput(nowCoderRunInputSchema, input, request.params.name);
           const preview = await provider.preparePlatformRun(parsed, extra.signal);
-          const authorized = await confirmPlatformRun(server, preview, extra.signal);
+          let authorized: boolean;
+          try {
+            authorized = await confirmPlatformRun(server, preview, extra.signal);
+          } catch (error) {
+            provider.cancelPlatformRun(preview.intentId);
+            throw error;
+          }
           return provider.commitPlatformRun(preview.intentId, authorized, extra.signal);
         }
         case "oj_poll_run":

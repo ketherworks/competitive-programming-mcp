@@ -286,6 +286,10 @@ export class NowCoderProvider {
     return this.judge.pollPlatformRun(input, signal);
   }
 
+  cancelPlatformRun(intentId: string): void {
+    this.judge.cancelPlatformRun(intentId);
+  }
+
   async getCapabilities(): Promise<OjCapabilities> {
     const checkedAt = this.nowIso();
     const hasSessionCookie = this.client.hasSessionCookie();

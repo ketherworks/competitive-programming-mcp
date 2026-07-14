@@ -145,6 +145,7 @@ export class NowCoderJudgeService {
   private readonly jobs = new Map<string, PollJob>();
   private readonly runIntents = new Map<string, PlatformRunIntent>();
   private readonly runJobs = new Map<string, PlatformRunJob>();
+  private readonly reservedRunRequestIds = new Set<string>();
 
   constructor(options: NowCoderJudgeServiceOptions) {
     this.gateway = options.gateway;
@@ -362,9 +363,11 @@ export class NowCoderJudgeService {
     if (!parsed.success || parsed.data.problem.platform !== "nowcoder" || parsed.data.mode !== "platform") {
       throw new NowCoderAdapterError("request.invalid", "Run a valid immutable code artifact against one NowCoder sample.");
     }
-    if (this.runJobs.has(parsed.data.requestId) || [...this.runIntents.values()].some((intent) => intent.request.requestId === parsed.data.requestId)) {
+    if (this.runJobs.has(parsed.data.requestId) || this.reservedRunRequestIds.has(parsed.data.requestId)) {
       throw new NowCoderAdapterError("policy.blocked", "This platform-run requestId was already prepared or dispatched; use oj_poll_run after dispatch.");
     }
+    this.reservedRunRequestIds.add(parsed.data.requestId);
+    try {
     const languageId = parsed.data.code.platformLanguageId;
     if (!languageId || !LANGUAGE_IDS.has(languageId)) throw new NowCoderAdapterError("language.unsupported", "NowCoder does not expose this language ID for the audited ACM editor.");
     if (parsed.data.code.bytes > 1024 * 1024) throw new NowCoderAdapterError("request.invalid", "NowCoder run source must not exceed 1 MiB.");
@@ -403,6 +406,10 @@ export class NowCoderJudgeService {
       phase: "prepared"
     });
     return preview;
+    } catch (error) {
+      this.reservedRunRequestIds.delete(parsed.data.requestId);
+      throw error;
+    }
   }
 
   async commitPlatformRun(intentId: string, authorized: boolean, signal?: AbortSignal): Promise<OjRunResult> {
@@ -410,10 +417,12 @@ export class NowCoderJudgeService {
     if (!intent) throw new NowCoderAdapterError("confirmation.expired", "Platform-run preview expired or was already consumed.");
     if (!authorized) {
       this.runIntents.delete(intentId);
+      this.reservedRunRequestIds.delete(intent.request.requestId);
       throw new NowCoderAdapterError("confirmation.required", "Explicit user confirmation is required before uploading code for a platform run.");
     }
     if (intent.phase !== "prepared" || Date.parse(intent.preview.expiresAt) <= this.now()) {
       this.runIntents.delete(intentId);
+      this.reservedRunRequestIds.delete(intent.request.requestId);
       throw new NowCoderAdapterError("confirmation.expired", "Platform-run preview expired or was already consumed.");
     }
     intent.phase = "committing";
@@ -424,6 +433,7 @@ export class NowCoderJudgeService {
       }
     } catch (error) {
       this.runIntents.delete(intentId);
+      this.reservedRunRequestIds.delete(intent.request.requestId);
       throw error;
     }
     let token: string;
@@ -453,6 +463,7 @@ export class NowCoderJudgeService {
       submitted = await this.gateway.submit(payload, signal);
     } catch (error) {
       this.runIntents.delete(intentId);
+      this.reservedRunRequestIds.delete(intent.request.requestId);
       if (isDefiniteSubmitRejection(error)) throw error;
       const result = runResult(intent.request, randomUUID(), startedAt, this.nowIso(), intent.sample.ordinal, "failed", "unknown", intent.sample, {}, intent.request.problem.url);
       this.runJobs.set(intent.request.requestId, {
@@ -481,9 +492,10 @@ export class NowCoderJudgeService {
         expiresAtMs: this.now() + POLL_JOB_TTL_MS,
         terminalResult: result
       });
+      this.reservedRunRequestIds.delete(intent.request.requestId);
       return result;
     }
-    const context = { ...payload, ...submitted, id: jobId, showId: 6 };
+    const context = pollContext(payload, submitted, jobId);
     const job: PlatformRunJob = {
       requestId: intent.request.requestId,
       jobId,
@@ -496,6 +508,7 @@ export class NowCoderJudgeService {
     };
     this.runJobs.set(job.requestId, job);
     this.runIntents.delete(intentId);
+    this.reservedRunRequestIds.delete(job.requestId);
     try {
       return await this.pollRunJob(job, this.maxPolls, signal);
     } catch (error) {
@@ -510,6 +523,13 @@ export class NowCoderJudgeService {
     const job = this.runJobs.get(input.requestId);
     if (!job) throw new NowCoderAdapterError("resource.not_found", "NowCoder platform-run request was not found in this process.");
     return this.pollRunJob(job, 1, signal);
+  }
+
+  cancelPlatformRun(intentId: string): void {
+    const intent = this.runIntents.get(intentId);
+    if (!intent) return;
+    this.runIntents.delete(intentId);
+    this.reservedRunRequestIds.delete(intent.request.requestId);
   }
 
   async platformRun(input: OjRunRequest, authorized: boolean, signal?: AbortSignal): Promise<OjRunResult> {
@@ -546,7 +566,10 @@ export class NowCoderJudgeService {
       if (job.expiresAtMs <= now) this.jobs.delete(operationId);
     }
     for (const [intentId, intent] of this.runIntents) {
-      if (Date.parse(intent.preview.expiresAt) <= now) this.runIntents.delete(intentId);
+      if (Date.parse(intent.preview.expiresAt) <= now) {
+        this.runIntents.delete(intentId);
+        this.reservedRunRequestIds.delete(intent.request.requestId);
+      }
     }
     for (const [requestId, job] of this.runJobs) {
       if (job.expiresAtMs <= now) this.runJobs.delete(requestId);
@@ -710,6 +733,7 @@ function pollContext(
   submitted: Record<string, unknown>,
   jobId: string
 ): Record<string, unknown> {
+  const protectedKeys = new Set(["id", "userId", "appId", "tagId", "submitType", "remark", "token", "showId", "content", "selfInputData", "selfOutputData"]);
   const context: Record<string, unknown> = {
     id: jobId,
     userId: payload.userId,
@@ -721,6 +745,7 @@ function pollContext(
     showId: 6
   };
   for (const [key, value] of Object.entries(submitted)) {
+    if (protectedKeys.has(key)) continue;
     if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key)) continue;
     if (typeof value === "string" && value.length <= 4_096) context[key] = value;
     else if (typeof value === "number" || typeof value === "boolean") context[key] = value;

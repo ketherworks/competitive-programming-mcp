@@ -68,10 +68,14 @@ interface NowCoderJudgePageInfo {
 }
 
 export function parseNowCoderJudgePageInfo(html: string): NowCoderJudgePageInfo {
-  const block = /\bwindow\.pageInfo\s*=\s*\{([\s\S]{0,100000}?)\}\s*;/.exec(html)?.[1];
-  if (!block) {
+  const pageInfoScripts = [...html.matchAll(/<script\b[^>]*>([\s\S]{0,100000}?)<\/script>/gi)]
+    .map((match) => match[1] ?? "")
+    .filter((script) => /\bwindow\.pageInfo\s*=/.test(script));
+  if (pageInfoScripts.length !== 1) {
     throw new NowCoderAdapterError("upstream.schema_changed", "NowCoder problem page did not expose a bounded pageInfo object.");
   }
+  const block = /\bwindow\.pageInfo\s*=\s*\{([\s\S]{0,100000}?)\}\s*;/.exec(pageInfoScripts[0]!)?.[1];
+  if (!block) throw new NowCoderAdapterError("upstream.schema_changed", "NowCoder pageInfo object did not match the audited script shape.");
   const questionId = field(block, "questionId");
   if (!questionId) {
     throw new NowCoderAdapterError("upstream.schema_changed", "NowCoder pageInfo did not expose the internal judge question ID.");

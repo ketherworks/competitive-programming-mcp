@@ -147,7 +147,11 @@ describe("NowCoder submission controller", () => {
       submissionOperationId: preview.submissionOperationId
     });
     expect(polled).toMatchObject({ state: "completed", verdict: "accepted", platformSubmissionId: "90001" });
-    expect(gateway.poll).toHaveBeenCalledWith(expect.objectContaining({ token: "short-token", id: "90001" }), undefined);
+    expect(gateway.poll).toHaveBeenCalledWith(expect.objectContaining({
+      token: "short-token",
+      id: "90001",
+      userId: "123456789"
+    }), undefined);
     expect(JSON.stringify(polled)).not.toContain("short-token");
     await expect(service.commitSubmission(commit, true)).rejects.toMatchObject({ code: "confirmation.expired" });
   });
@@ -332,6 +336,26 @@ describe("NowCoder submission controller", () => {
     expect(gateway.submit).toHaveBeenCalledTimes(1);
     await expect(service.preparePlatformRun(run)).rejects.toMatchObject({ code: "policy.blocked" });
   });
+
+  test("reserves a platform-run requestId before asynchronous preparation", async () => {
+    const gateway = gatewayFixture();
+    const service = new NowCoderJudgeService({ gateway, verifyArtifact });
+    const prepared = request();
+    const run: OjRunRequest = {
+      schemaVersion: "oj.run-request/v1",
+      requestId: "run-concurrent",
+      attemptId: "attempt-1",
+      problem: prepared.problem,
+      mode: "platform",
+      code: prepared.code,
+      sampleOrdinals: [1],
+      limits: { wallTimeMs: 32_000, outputBytes: 1_048_576, network: "deny" }
+    };
+
+    const first = service.preparePlatformRun(run);
+    await expect(service.preparePlatformRun(run)).rejects.toMatchObject({ code: "policy.blocked" });
+    await expect(first).resolves.toMatchObject({ requestId: "run-concurrent" });
+  });
 });
 
 function gatewayFixture(): NowCoderJudgeGateway & {
@@ -342,7 +366,12 @@ function gatewayFixture(): NowCoderJudgeGateway & {
   return {
     prepareContext: vi.fn(async () => preparation()),
     obtainAccessToken: vi.fn(async () => "short-token"),
-    submit: vi.fn(async () => ({ id: "90001", submissionId: "90001" })),
+    submit: vi.fn(async () => ({
+      id: "90001",
+      submissionId: "90001",
+      token: "untrusted-response-token",
+      userId: "untrusted-response-user"
+    })),
     poll: vi.fn(async () => ({ status: 1 }))
   };
 }

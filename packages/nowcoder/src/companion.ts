@@ -68,6 +68,7 @@ export class CompetitiveCompanionImporter {
   private readonly nowIso: () => string;
   private readonly completions = new Map<string, Promise<Completion>>();
   private active?: ActiveWindow;
+  private opening = false;
 
   constructor(options: CompetitiveCompanionImporterOptions = {}) {
     this.port = options.port ?? configuredPort(process.env.COMPETITIVE_COMPANION_PORT);
@@ -79,6 +80,11 @@ export class CompetitiveCompanionImporter {
   }
 
   async open(input: OjImportWindowRequest): Promise<OjImportWindow> {
+    if (this.opening) {
+      throw new NowCoderAdapterError("policy.blocked", "A Competitive Companion import window is already opening.");
+    }
+    this.opening = true;
+    try {
     const parsed = ojImportWindowRequestSchema.safeParse(input);
     if (
       !parsed.success
@@ -128,6 +134,9 @@ export class CompetitiveCompanionImporter {
       state: "waiting",
       endpoint: `http://127.0.0.1:${address.port}/`
     });
+    } finally {
+      this.opening = false;
+    }
   }
 
   async complete(windowId: string): Promise<OjImportPreview> {
