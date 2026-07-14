@@ -9,13 +9,14 @@ import {
   type OjProviderHealth,
   type OjSourceRef
 } from "@kaiserunix/oj-mcp-contracts";
+import { authStatusMessage, nowCoderAuthStatusSchema, type NowCoderAuthStatus } from "./auth.js";
 import { NowCoderPageClient } from "./client.js";
 import { NowCoderAdapterError } from "./errors.js";
 import { parseNowCoderProblemHtml } from "./parser.js";
 import { resolveNowCoderProblemLocator, type NowCoderProblemLocator } from "./url.js";
 
 const PROVIDER_ID = "nowcoder-public-page";
-const PROVIDER_VERSION = "0.1.0";
+const PROVIDER_VERSION = "0.2.0";
 
 export interface NowCoderProviderOptions {
   client?: NowCoderPageClient;
@@ -76,10 +77,23 @@ export class NowCoderProvider {
     }
   }
 
+  async getAuthStatus(options: { signal?: AbortSignal } = {}): Promise<NowCoderAuthStatus> {
+    const status = await this.client.getSessionStatus(options);
+    return nowCoderAuthStatusSchema.parse({
+      schemaVersion: "nowcoder.auth-status/v1",
+      platform: "nowcoder",
+      providerId: PROVIDER_ID,
+      ...status,
+      checkedAt: this.nowIso(),
+      message: authStatusMessage(status.state)
+    });
+  }
+
   async getCapabilities(): Promise<OjCapabilities> {
     const checkedAt = this.nowIso();
+    const hasSessionCookie = this.client.hasSessionCookie();
     const operations = Object.fromEntries(
-      capabilityNames.map((name) => [name, capability(name, checkedAt)])
+      capabilityNames.map((name) => [name, capability(name, checkedAt, hasSessionCookie)])
     ) as Record<OjCapabilityName, OjCapability>;
     return ojCapabilitiesSchema.parse({
       schemaVersion: "oj.capabilities/v1",
@@ -115,7 +129,7 @@ export class NowCoderProvider {
         overall: "healthy",
         layers: { transport: "pass", protocol: "pass", schema: "pass", auth: "not_required", upstream: "pass" },
         latencyMs: observation.latencyMs,
-        message: "The last anonymous NowCoder public page fetch parsed successfully."
+        message: "The last NowCoder page fetch parsed successfully."
       });
     }
     return ojProviderHealthSchema.parse(healthFromError(observation));
@@ -135,25 +149,27 @@ const capabilityNames: OjCapabilityName[] = [
   "pollSubmission"
 ];
 
-function capability(name: OjCapabilityName, checkedAt: string): OjCapability {
+function capability(name: OjCapabilityName, checkedAt: string, hasSessionCookie: boolean): OjCapability {
   if (name === "fetchProblem") {
     return {
       name,
       status: "available",
       toolName: "oj_fetch_problem",
       transport: "local_stdio",
-      auth: "none",
-      risk: "R0_public_read",
+      auth: hasSessionCookie ? "session_cookie" : "none",
+      risk: hasSessionCookie ? "R1_private_read" : "R0_public_read",
       compliance: "unofficial",
-      reason: "Reads audited official public NowCoder HTML; this is a page adapter, not an official API.",
+      reason: hasSessionCookie
+        ? "Reads allowlisted NowCoder HTML with a local user-provided session; private responses must remain local."
+        : "Reads audited official public NowCoder HTML; this is a page adapter, not an official API.",
       checkedAt
     };
   }
   const reason = name === "searchProblems"
-    ? "No stable anonymous NowCoder search source has been audited."
+    ? "No stable NowCoder problem-search source has been audited."
     : name === "importProblem"
       ? "This stdio adapter does not open a browser or receive Competitive Companion posts."
-      : "This anonymous read-only page adapter does not expose this operation.";
+      : "This local read-only page adapter does not expose this operation.";
   return {
     name,
     status: "unsupported",

@@ -26,6 +26,134 @@ describe("NowCoderPageClient", () => {
     expect(calls).toEqual(["https://ac.nowcoder.com/acm/problem/218144"]);
   });
 
+  test("attaches an opaque local session only to an allowlisted NowCoder request", async () => {
+    const html = await loadFixture("acm-problem.html");
+    const observed: Array<{ url: string; sessionCookie?: string }> = [];
+    const client = new NowCoderPageClient({
+      sessionCookie: "NOWCODER_SESSION=secret-value; token=second-secret",
+      requester: async (url, context) => {
+        observed.push({ url: url.href, sessionCookie: context.sessionCookie });
+        return response(200, html, { "content-type": "text/html" });
+      }
+    });
+
+    await client.getProblemPage("https://ac.nowcoder.com/acm/problem/218144");
+
+    expect(observed).toEqual([{
+      url: "https://ac.nowcoder.com/acm/problem/218144",
+      sessionCookie: "NOWCODER_SESSION=secret-value; token=second-secret"
+    }]);
+  });
+
+  test.each([
+    "",
+    "   ",
+    "session=secret\r\nX-Injected: true",
+    "session=secret\0suffix",
+    `session=${"x".repeat(16_385)}`
+  ].map((sessionCookie, index) => [index, sessionCookie] as const))(
+    "rejects unsafe session cookie case %i without echoing it",
+    (_index, sessionCookie) => {
+      expect(() => new NowCoderPageClient({ sessionCookie })).toThrow("NowCoder session cookie is invalid");
+      try {
+        new NowCoderPageClient({ sessionCookie });
+      } catch (error) {
+        if (sessionCookie.length > 0) expect(String(error)).not.toContain(sessionCookie);
+      }
+    }
+  );
+
+  test("reports an unconfigured session without making a network request", async () => {
+    let requests = 0;
+    const client = new NowCoderPageClient({
+      requester: async () => {
+        requests += 1;
+        return response(500, "");
+      }
+    });
+
+    await expect(client.getSessionStatus()).resolves.toEqual({
+      configured: false,
+      state: "not_configured"
+    });
+    expect(requests).toBe(0);
+  });
+
+  test("validates a configured session against NowCoder's server-rendered login marker", async () => {
+    const requests: Array<{ url: string; sessionCookie?: string }> = [];
+    const client = new NowCoderPageClient({
+      sessionCookie: "NOWCODER_SESSION=secret-value",
+      requester: async (url, context) => {
+        requests.push({ url: url.href, sessionCookie: context.sessionCookie });
+        return response(200, "<script>window.isLogin = true;</script>", { "content-type": "text/html" });
+      }
+    });
+
+    await expect(client.getSessionStatus()).resolves.toEqual({
+      configured: true,
+      state: "authenticated"
+    });
+    expect(requests).toEqual([{
+      url: "https://ac.nowcoder.com/",
+      sessionCookie: "NOWCODER_SESSION=secret-value"
+    }]);
+  });
+
+  test("reports an expired configured session from NowCoder's anonymous marker", async () => {
+    const client = new NowCoderPageClient({
+      sessionCookie: "NOWCODER_SESSION=expired-secret",
+      requester: async () => response(
+        200,
+        "<script>window.isLogin = false;</script>",
+        { "content-type": "text/html" }
+      )
+    });
+
+    await expect(client.getSessionStatus()).resolves.toEqual({
+      configured: true,
+      state: "expired"
+    });
+  });
+
+  test("keeps anti-bot challenges distinct from an expired login", async () => {
+    const challenge = await loadFixture("challenge.html");
+    const client = new NowCoderPageClient({
+      sessionCookie: "NOWCODER_SESSION=configured-secret",
+      requester: async () => response(200, challenge, { "content-type": "text/html" })
+    });
+
+    await expect(client.getSessionStatus()).resolves.toEqual({
+      configured: true,
+      state: "challenge"
+    });
+  });
+
+  test("rejects non-HTML auth probes instead of reporting an ambiguous session", async () => {
+    const client = new NowCoderPageClient({
+      sessionCookie: "NOWCODER_SESSION=configured-secret",
+      requester: async () => response(200, "{}", { "content-type": "application/json" })
+    });
+
+    await expect(client.getSessionStatus()).rejects.toMatchObject({
+      code: "upstream.schema_changed"
+    });
+  });
+
+  test("preserves auth-probe rate limits as retryable errors", async () => {
+    const client = new NowCoderPageClient({
+      sessionCookie: "NOWCODER_SESSION=configured-secret",
+      requester: async () => response(429, "slow down", {
+        "content-type": "text/html",
+        "retry-after": "2"
+      })
+    });
+
+    await expect(client.getSessionStatus()).rejects.toMatchObject({
+      code: "rate_limited",
+      options: { httpStatus: 429, retryAfterMs: 2_000 }
+    });
+  });
+
   test("follows a bounded redirect only when every target remains allowlisted", async () => {
     const html = await loadFixture("acm-problem.html");
     const calls: string[] = [];
@@ -46,13 +174,22 @@ describe("NowCoderPageClient", () => {
   });
 
   test("blocks redirects that could turn the adapter into an SSRF relay", async () => {
+    const observed: Array<{ url: string; sessionCookie?: string }> = [];
     const client = new NowCoderPageClient({
-      requester: sequenceRequester([response(302, "", { location: "https://127.0.0.1/admin" })])
+      sessionCookie: "NOWCODER_SESSION=redirect-secret",
+      requester: async (url, context) => {
+        observed.push({ url: url.href, sessionCookie: context.sessionCookie });
+        return response(302, "", { location: "https://127.0.0.1/admin" });
+      }
     });
 
     await expect(client.getProblemPage("https://ac.nowcoder.com/acm/problem/218144")).rejects.toMatchObject({
       code: "policy.blocked"
     });
+    expect(observed).toEqual([{
+      url: "https://ac.nowcoder.com/acm/problem/218144",
+      sessionCookie: "NOWCODER_SESSION=redirect-secret"
+    }]);
   });
 
   test("enforces the response limit in UTF-8 bytes", async () => {

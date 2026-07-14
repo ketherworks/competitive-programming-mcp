@@ -167,7 +167,8 @@ describe("pinned HTTPS transport", () => {
         { address: "2606:4700:4700::1111", family: 6 },
         { address: "1.1.1.1", family: 4 }
       ],
-      signal: controller.signal
+      signal: controller.signal,
+      sessionCookie: "NOWCODER_SESSION=transport-secret"
     });
 
     expect(requestOptions).toMatchObject({
@@ -176,6 +177,7 @@ describe("pinned HTTPS transport", () => {
       rejectUnauthorized: true,
       autoSelectFamily: true
     });
+    expect(requestOptions?.headers).toMatchObject({ Cookie: "NOWCODER_SESSION=transport-secret" });
     const lookup = requestOptions?.lookup as (
       hostname: string,
       options: { all: true },

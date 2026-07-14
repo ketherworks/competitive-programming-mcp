@@ -30,6 +30,7 @@ describe("standalone MCP source export", () => {
     const rootManifest = JSON.parse(await readFile(join(outputDir, "package.json"), "utf8")) as {
       scripts: Record<string, string>;
       workspaces: string[];
+      version: string;
     };
     expect(rootManifest.workspaces).toEqual(["packages/*"]);
     expect(rootManifest.scripts.check).toBe("npm run clean && npm run build && npm test");
@@ -43,6 +44,7 @@ describe("standalone MCP source export", () => {
       mcpName: "io.github.ketherworks/atcoder",
       repository: { type: "git", url: "git+https://github.com/ketherworks/atcoder-mcp-server.git" }
     });
+    expect(rootManifest.version).toBe(packageManifest.version);
 
     const provenance = await readFile(join(outputDir, "PROVENANCE.md"), "utf8");
     expect(provenance).toContain(sourceCommit);

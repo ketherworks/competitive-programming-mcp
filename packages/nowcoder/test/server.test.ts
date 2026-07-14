@@ -10,6 +10,36 @@ import { loadFixture } from "./fixtureLoader.js";
 const url = "https://ac.nowcoder.com/acm/problem/218144";
 
 describe("NowCoder MCP server", () => {
+  test("exposes a redacted session-status probe as a read-only MCP tool", async () => {
+    const provider = new NowCoderProvider({
+      client: new NowCoderPageClient({
+        sessionCookie: "NOWCODER_SESSION=must-not-escape",
+        requester: async () => ({
+          status: 200,
+          body: "<script>window.isLogin = true;</script>",
+          headers: { "content-type": "text/html" }
+        })
+      }),
+      nowIso: () => "2026-07-14T11:00:00.000Z"
+    });
+    const { client, server } = await connect(provider);
+
+    const result = await client.callTool({ name: "nowcoder_auth_status", arguments: {} });
+
+    expect(result).toMatchObject({
+      structuredContent: {
+        schemaVersion: "nowcoder.auth-status/v1",
+        platform: "nowcoder",
+        configured: true,
+        state: "authenticated",
+        checkedAt: "2026-07-14T11:00:00.000Z"
+      }
+    });
+    expect(JSON.stringify(result)).not.toContain("must-not-escape");
+    await client.close();
+    await server.close();
+  });
+
   test("lists exactly the approved read-only tools and returns an OjProblemDocument", async () => {
     const html = await loadFixture("acm-problem.html");
     const provider = new NowCoderProvider({
@@ -30,6 +60,11 @@ describe("NowCoder MCP server", () => {
     expect(listed.tools.every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
     expect(listed.tools.some((tool) => /search|run|submit|cookie|browser/i.test(tool.name))).toBe(false);
     expect(listed.tools.every((tool) => JSON.stringify(tool.outputSchema).includes("oj.error/v1"))).toBe(true);
+    const fetchTool = listed.tools.find((tool) => tool.name === "oj_fetch_problem");
+    expect(Object.keys((fetchTool?.inputSchema.properties ?? {}) as Record<string, unknown>).sort()).toEqual([
+      "nativeId",
+      "url"
+    ]);
     expect("structuredContent" in urlResult && urlResult.structuredContent).toMatchObject({
       schemaVersion: "oj.problem-document/v1",
       ref: { platform: "nowcoder", nativeId: "NC218144" }

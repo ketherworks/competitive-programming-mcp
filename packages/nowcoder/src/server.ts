@@ -10,11 +10,17 @@ import {
 } from "@kaiserunix/oj-mcp-contracts";
 import { toOjToolOutputSchema, toToolError, toToolResult } from "@kaiserunix/oj-mcp-server-common";
 import { z } from "zod";
+import { nowCoderAuthStatusSchema } from "./auth.js";
 import { NowCoderAdapterError } from "./errors.js";
 import { NowCoderProvider } from "./provider.js";
 import type { NowCoderProblemLocator } from "./url.js";
 
-export const NOWCODER_MCP_TOOL_NAMES = ["oj_capabilities", "oj_health", "oj_fetch_problem"] as const;
+export const NOWCODER_MCP_TOOL_NAMES = [
+  "oj_capabilities",
+  "oj_health",
+  "oj_fetch_problem",
+  "nowcoder_auth_status"
+] as const;
 
 const fetchProblemInputSchema = z.object({
   url: z.string().url().max(2_048).describe(
@@ -32,7 +38,7 @@ const tools: Tool[] = [
   tool(
     "oj_capabilities",
     "NowCoder Provider Capabilities",
-    "Report the audited anonymous NowCoder page-adapter capability and explicitly unsupported operations.",
+    "Report the audited NowCoder page-adapter capability, optional local-session mode, and explicitly unsupported operations.",
     emptyInputSchema,
     ojCapabilitiesSchema,
     false
@@ -48,16 +54,24 @@ const tools: Tool[] = [
   tool(
     "oj_fetch_problem",
     "Fetch NowCoder Problem",
-    "Fetch and normalize one anonymous official public NowCoder ACM problem page. This is not an official API and never uses cookies, a browser, execution, or submission.",
+    "Fetch and normalize one allowlisted official NowCoder ACM problem page. An optional startup-injected local session may be used; this is not an official API and never performs browser automation, execution, or submission.",
     fetchProblemInputSchema,
     ojProblemDocumentSchema,
+    true
+  ),
+  tool(
+    "nowcoder_auth_status",
+    "NowCoder Login Status",
+    "Validate the configured local session without returning account identity or cookie data.",
+    emptyInputSchema,
+    nowCoderAuthStatusSchema,
     true
   )
 ];
 
 export function createNowCoderMcpServer(options: { provider?: NowCoderProvider } = {}): McpServer {
   const provider = options.provider ?? new NowCoderProvider();
-  const server = new McpServer({ name: "nowcoder-mcp-server", version: "0.1.0" });
+  const server = new McpServer({ name: "nowcoder-mcp-server", version: "0.2.0" });
   server.server.registerCapabilities({ tools: { listChanged: false } });
   server.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
   server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
@@ -70,6 +84,9 @@ export function createNowCoderMcpServer(options: { provider?: NowCoderProvider }
         case "oj_health":
           parseInput(emptyInputSchema, input, request.params.name);
           return provider.getHealth();
+        case "nowcoder_auth_status":
+          parseInput(emptyInputSchema, input, request.params.name);
+          return provider.getAuthStatus({ signal: extra.signal });
         case "oj_fetch_problem":
           return provider.fetchProblem(parseInput(fetchProblemInputSchema, input, request.params.name) as NowCoderProblemLocator, {
             signal: extra.signal
