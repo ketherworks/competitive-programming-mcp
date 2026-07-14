@@ -58,11 +58,14 @@ with or endorsed by AtCoder Inc. Problem content remains subject to the
     packageName: "@ketherworks/nowcoder-oj-mcp",
     mcpName: "io.github.ketherworks/nowcoder-oj-mcp",
     binaryName: "nowcoder-mcp-server",
-    description: "Hardened local MCP server for public NowCoder ACM problem pages.",
-    tools: ["oj_capabilities", "oj_health", "oj_fetch_problem"],
+    description: "Hardened local MCP server for allowlisted NowCoder ACM problem pages.",
+    tools: ["oj_capabilities", "oj_health", "oj_fetch_problem", "nowcoder_auth_status"],
     worker: false,
+    acceptsSessionCookie: true,
+    localizedReadme: "README.zh-CN.md",
     policy: `This project is unofficial and is not affiliated with or endorsed by NowCoder.
-It never bypasses anti-bot challenges and intentionally remains local stdio only.`
+It supports an optional startup-injected local session, never bypasses anti-bot challenges, and
+intentionally remains local stdio only.`
   }
 };
 
@@ -123,9 +126,12 @@ export async function exportStandalone({ platform, outputDir, sourceCommit }) {
     const implementationReadme = (await readFile(join(destination, "packages", platform, "README.md"), "utf8"))
       .replace(/^# .+\r?\n/, "")
       .trim();
+    const localizedReadme = config.localizedReadme
+      ? await readFile(join(destination, "packages", platform, config.localizedReadme), "utf8")
+      : undefined;
 
     await Promise.all([
-      writeJson(join(destination, "package.json"), rootManifest(platform, config)),
+      writeJson(join(destination, "package.json"), rootManifest(platform, config, providerManifest.version)),
       writeJson(join(destination, "tsconfig.json"), {
         files: [],
         references: [
@@ -143,6 +149,9 @@ export async function exportStandalone({ platform, outputDir, sourceCommit }) {
       ),
       writeFile(join(destination, "PROVENANCE.md"), provenance(platform, sourceCommit), "utf8"),
       writeFile(join(destination, "SECURITY.md"), securityPolicy(config), "utf8"),
+      ...(localizedReadme === undefined
+        ? []
+        : [writeFile(join(destination, config.localizedReadme), localizedReadme, "utf8")]),
       writeFile(join(destination, "scripts", "verify-release-tag.mjs"), verifyReleaseTag(platform), "utf8"),
       writeFile(join(destination, ".github", "workflows", "ci.yml"), ciWorkflow(platform, config), "utf8"),
       writeFile(join(destination, ".github", "workflows", "release.yml"), releaseWorkflow(config), "utf8")
@@ -219,7 +228,7 @@ async function copy(sourceRoot, source, destination) {
   });
 }
 
-function rootManifest(platform, config) {
+function rootManifest(platform, config, providerVersion) {
   const packCheck =
     platform === "codeforces"
       ? `npm run test:pack --workspace ${config.packageName}`
@@ -228,7 +237,7 @@ function rootManifest(platform, config) {
         : `npm pack --dry-run --workspace ${config.packageName}`;
   return {
     name: `${platform}-mcp-server-workspace`,
-    version: "0.1.0",
+    version: providerVersion,
     private: true,
     type: "module",
     workspaces: ["packages/*"],
@@ -277,9 +286,17 @@ No end-user API key, cookie, or account credential is accepted.
 
 `
     : "";
+  const credentialPolicy = config.acceptsSessionCookie
+    ? `The server accepts an optional NowCoder Cookie only from \`NOWCODER_SESSION_COOKIE\` at local
+stdio process startup. Inject it from a trusted secret manager; never put it in tool arguments,
+MCP configuration files, command-line arguments, logs, or committed files.`
+    : "It accepts no judge account credentials.";
+  const localizedNavigation = config.localizedReadme
+    ? `[简体中文](${config.localizedReadme})\n\n`
+    : "";
   return `# ${config.displayName}
 
-${config.description}
+${localizedNavigation}${config.description}
 
 This is a standalone release workspace generated from the audited
 [Kether Works OJ adapter source](${sourceRepository}/tree/${sourceCommit}/packages/${platform}).
@@ -322,7 +339,7 @@ publication are intentionally separate steps and are not claimed until their own
 
 ${config.policy}
 
-The server exposes no run or submit tool. It accepts no judge account credentials. See
+The server exposes no run or submit tool. ${credentialPolicy} See
 [SECURITY.md](SECURITY.md) for the security boundary and [PROVENANCE.md](PROVENANCE.md) for the
 canonical source revision.
 
@@ -358,14 +375,22 @@ reviewed in the canonical monorepo, then exported with the exact source commit r
 }
 
 function securityPolicy(config) {
+  const credentialBoundary = config.acceptsSessionCookie
+    ? `Its only credential-forwarding path is an optional Cookie read from
+\`NOWCODER_SESSION_COOKIE\` at local process startup and sent to an allowlisted
+\`https://ac.nowcoder.com\` request. The Cookie must never enter tool arguments, output, logs,
+files, cross-origin redirects, or a remotely hosted transport. The server must not gain automatic
+browser-cookie extraction, submission, code execution, or challenge-bypass behavior without a
+separate threat model and explicit security review.`
+    : `It must not gain submission, code-execution, credential-forwarding, or challenge-bypass
+behavior without a separate threat model and explicit security review.`;
   return `# Security Policy
 
 Report vulnerabilities through the private GitHub Security Advisory form for
 \`ketherworks/${config.repositoryName}\`. Do not include judge cookies, account tokens, source code,
 or other secrets in a public issue.
 
-This server is read-only. It must not gain submission, code-execution, credential-forwarding, or
-challenge-bypass behavior without a separate threat model and explicit security review.
+This server is read-only. ${credentialBoundary}
 `;
 }
 

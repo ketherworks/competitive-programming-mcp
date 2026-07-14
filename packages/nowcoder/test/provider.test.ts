@@ -44,6 +44,24 @@ describe("NowCoderProvider", () => {
     });
   });
 
+  test("raises fetch risk and declares session-cookie auth when a local session is configured", async () => {
+    const provider = new NowCoderProvider({
+      client: new NowCoderPageClient({
+        sessionCookie: "NOWCODER_SESSION=private-secret",
+        requester: async () => ({ status: 500, body: "", headers: {} })
+      }),
+      nowIso
+    });
+
+    const capabilities = await provider.getCapabilities();
+
+    expect(capabilities.operations.fetchProblem).toMatchObject({
+      status: "available",
+      auth: "session_cookie",
+      risk: "R1_private_read"
+    });
+  });
+
   test("does not make a live health probe and reports a successful prior parse", async () => {
     const html = await loadFixture("acm-problem.html");
     let requests = 0;

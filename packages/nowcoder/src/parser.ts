@@ -20,7 +20,7 @@ import {
 import { parseNowCoderProblemUrl } from "./url.js";
 
 const ADAPTER_ID = "nowcoder-public-page";
-const ADAPTER_VERSION = "0.1.0";
+const ADAPTER_VERSION = "0.2.0";
 
 export interface ParseNowCoderOptions {
   url: string;
@@ -32,7 +32,7 @@ export function parseNowCoderProblemHtml(html: string, options: ParseNowCoderOpt
   if (isChallengeHtml(html)) {
     throw new NowCoderAdapterError(
       "challenge.required",
-      "NowCoder returned an anti-bot challenge. This adapter does not use cookies or a browser to bypass it."
+      "NowCoder returned an anti-bot challenge. This adapter does not use browser automation or attempt to bypass it."
     );
   }
 

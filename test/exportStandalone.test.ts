@@ -30,6 +30,7 @@ describe("standalone MCP source export", () => {
     const rootManifest = JSON.parse(await readFile(join(outputDir, "package.json"), "utf8")) as {
       scripts: Record<string, string>;
       workspaces: string[];
+      version: string;
     };
     expect(rootManifest.workspaces).toEqual(["packages/*"]);
     expect(rootManifest.scripts.check).toBe("npm run clean && npm run build && npm test");
@@ -43,6 +44,7 @@ describe("standalone MCP source export", () => {
       mcpName: "io.github.ketherworks/atcoder",
       repository: { type: "git", url: "git+https://github.com/ketherworks/atcoder-mcp-server.git" }
     });
+    expect(rootManifest.version).toBe(packageManifest.version);
 
     const provenance = await readFile(join(outputDir, "PROVENANCE.md"), "utf8");
     expect(provenance).toContain(sourceCommit);
@@ -93,6 +95,33 @@ describe("standalone MCP source export", () => {
       })
     ).rejects.toThrow("must not already exist");
   });
+
+  test("exports the NowCoder session boundary and Chinese README", async () => {
+    const parentDir = await mkdtemp(join(tmpdir(), "nowcoder-mcp-export-"));
+    const outputDir = join(parentDir, "standalone");
+    temporaryDirectories.push(parentDir);
+
+    await exportStandalone({
+      platform: "nowcoder",
+      outputDir,
+      sourceCommit: currentCommit()
+    });
+
+    const manifest = JSON.parse(await readFile(join(outputDir, "package.json"), "utf8")) as {
+      version: string;
+    };
+    const readme = await readFile(join(outputDir, "README.md"), "utf8");
+    const chineseReadme = await readFile(join(outputDir, "README.zh-CN.md"), "utf8");
+    const security = await readFile(join(outputDir, "SECURITY.md"), "utf8");
+
+    expect(manifest.version).toBe("0.2.0");
+    expect(readme).toContain("[简体中文](README.zh-CN.md)");
+    expect(readme).toContain("`nowcoder_auth_status`");
+    expect(readme).toContain("`NOWCODER_SESSION_COOKIE`");
+    expect(chineseReadme).toContain("## 本地登录态");
+    expect(security).toContain("must never enter tool arguments");
+    expect(security).toContain("remotely hosted transport");
+  }, 120_000);
 
   test("rejects a syntactically valid commit that does not exist", async () => {
     const parentDir = await mkdtemp(join(tmpdir(), "invalid-commit-export-"));

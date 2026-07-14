@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { createNowCoderMcpServer } from "./server.js";
+import { createNowCoderMcpServerFromEnvironment } from "./bootstrap.js";
 
-const server = createNowCoderMcpServer();
+const server = createNowCoderMcpServerFromEnvironment();
 await server.connect(new StdioServerTransport());

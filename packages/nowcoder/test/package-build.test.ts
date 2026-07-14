@@ -37,6 +37,7 @@ describe("package build scripts", () => {
       "dist/index.d.ts",
       "dist/index.d.ts.map",
       "README.md",
+      "README.zh-CN.md",
       "LICENSE"
     ]);
   });

@@ -34,7 +34,7 @@ describe("parseNowCoderProblemHtml", () => {
       source: {
         kind: "page_adapter",
         adapterId: "nowcoder-public-page",
-        adapterVersion: "0.1.0",
+        adapterVersion: "0.2.0",
         fetchedAt,
         sourceUrl: "https://ac.nowcoder.com/acm/problem/218144",
         rawRef: "NC218144",
