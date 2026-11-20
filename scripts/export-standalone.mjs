@@ -136,9 +136,9 @@ export async function exportStandalone({ platform, outputDir, sourceCommit }) {
   if (!/^[a-f0-9]{40}$/i.test(sourceCommit)) throw new TypeError("sourceCommit must be a full Git commit SHA.");
 
   const destination = await standaloneDestination(outputDir);
-  const stagingDirectory = await archiveSourceCommit(sourceCommit, platform);
-  const archivedSource = join(stagingDirectory, "source");
+  await assertSourceCommitExists(sourceCommit);
   let destinationCreated = false;
+  let stagingDirectory;
 
   try {
     try {
@@ -150,6 +150,9 @@ export async function exportStandalone({ platform, outputDir, sourceCommit }) {
       }
       throw error;
     }
+
+    stagingDirectory = await archiveSourceCommit(sourceCommit, platform);
+    const archivedSource = join(stagingDirectory, "source");
 
     await Promise.all([
       copy(archivedSource, "LICENSE", join(destination, "LICENSE")),
@@ -256,7 +259,7 @@ export async function exportStandalone({ platform, outputDir, sourceCommit }) {
     if (destinationCreated) await rm(destination, { recursive: true, force: true });
     throw error;
   } finally {
-    await rm(stagingDirectory, { recursive: true, force: true });
+    if (stagingDirectory) await rm(stagingDirectory, { recursive: true, force: true });
   }
 }
 
@@ -276,13 +279,15 @@ async function standaloneDestination(outputDir) {
   return destination;
 }
 
-async function archiveSourceCommit(sourceCommit, platform) {
+async function assertSourceCommitExists(sourceCommit) {
   try {
     await execFileAsync("git", ["-C", repositoryRoot, "cat-file", "-e", `${sourceCommit}^{commit}`]);
   } catch (error) {
     throw new Error(`The source commit ${sourceCommit} does not exist in the canonical repository.`, { cause: error });
   }
+}
 
+async function archiveSourceCommit(sourceCommit, platform) {
   const stagingDirectory = await mkdtemp(join(tmpdir(), "oj-mcp-standalone-source-"));
   const archivePath = join(stagingDirectory, "source.tar");
   const sourceDirectory = join(stagingDirectory, "source");

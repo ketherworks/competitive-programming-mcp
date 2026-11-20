@@ -1,9 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
   ojCapabilitiesSchema,
   ojCodeArtifactSchema,
-  ojErrorSchema,
   ojImportPreviewSchema,
   ojImportWindowRequestSchema,
   ojImportWindowSchema,
@@ -16,11 +15,17 @@ import {
   ojSubmitCommitRequestSchema,
   ojSubmitPreviewSchema,
   ojSubmitResultSchema,
-  type OjSubmitPreview,
   type OjError,
-  type OjErrorCode
+  type OjSubmitPreview
 } from "@kaiserunix/oj-mcp-contracts";
-import { toOjToolOutputSchema, toToolError, toToolResult } from "@kaiserunix/oj-mcp-server-common";
+import {
+  defineOjTool,
+  executeOjToolCall,
+  parseStrictToolInput,
+  strictEmptyInputSchema,
+  type OjErrorNormalizerOptions,
+  type OjToolBehavior
+} from "@kaiserunix/oj-mcp-server-common";
 import { z } from "zod";
 import { nowCoderAuthStatusSchema } from "./auth.js";
 import { safeConfirmationValue } from "./artifact.js";
@@ -58,7 +63,6 @@ const fetchProblemInputSchema = z.object({
 }).strict().refine((value) => (value.url === undefined) !== (value.nativeId === undefined), {
   message: "Provide exactly one URL or nativeId."
 });
-const emptyInputSchema = z.object({}).strict();
 const nowCoderCodeArtifactSchema = ojCodeArtifactSchema.safeExtend({
   sourceUri: z.string().url().min(8).max(4_096),
   sourceWasDirty: z.literal(false)
@@ -81,12 +85,41 @@ const pollRunInputSchema = z.object({
   requestId: z.string().min(1).max(200)
 }).strict();
 
+const errorNormalizer: OjErrorNormalizerOptions = {
+  platform: "nowcoder",
+  providerId: "nowcoder-public-page",
+  internalMessage: "NowCoder provider failed.",
+  fallbackMessage: "NowCoder provider failed to produce a valid error response.",
+  resolveLayer: (error): OjError["layer"] => {
+    if (error.code === "request.invalid" || error.code === "internal") return "broker";
+    if (error.code === "policy.blocked" || error.code.startsWith("confirmation.")) return "policy";
+    if (error.code.startsWith("auth.") || error.code === "challenge.required") return "auth";
+    if (error.code === "network.timeout") return "transport";
+    return "upstream";
+  },
+  resolveRetryPolicy: (error): OjError["retryPolicy"] => {
+    if (error.code === "challenge.required") return "after_user_action";
+    if (error.code === "rate_limited" || error.code === "network.timeout" || error.code === "upstream.unavailable") {
+      return "safe_read";
+    }
+    return "never";
+  },
+  resolveUserAction: (error): OjError["userAction"] => {
+    if (error.code === "challenge.required") return "solve_challenge";
+    if (error.code === "rate_limited" || error.code === "network.timeout" || error.code === "upstream.unavailable") {
+      return "retry";
+    }
+    if (error.code === "upstream.schema_changed" || error.code === "internal") return "open_logs";
+    return "none";
+  }
+};
+
 const tools: Tool[] = [
   tool(
     "oj_capabilities",
     "NowCoder Provider Capabilities",
     "Report the active NowCoder tools, authentication mode, operation risk, and judge language IDs.",
-    emptyInputSchema,
+    strictEmptyInputSchema,
     ojCapabilitiesSchema,
     false
   ),
@@ -94,7 +127,7 @@ const tools: Tool[] = [
     "oj_health",
     "NowCoder Provider Health",
     "Report passive adapter health from the last fetch; this tool does not probe NowCoder.",
-    emptyInputSchema,
+    strictEmptyInputSchema,
     ojProviderHealthSchema,
     false
   ),
@@ -195,7 +228,7 @@ const tools: Tool[] = [
     "nowcoder_auth_status",
     "NowCoder Login Status",
     "Validate the configured local session without returning account identity or cookie data.",
-    emptyInputSchema,
+    strictEmptyInputSchema,
     nowCoderAuthStatusSchema,
     true
   )
@@ -208,68 +241,75 @@ export function createNowCoderMcpServer(options: { provider?: NowCoderProvider }
   server.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
   server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const input = request.params.arguments ?? {};
-    return callSafely(async () => {
-      switch (request.params.name) {
-        case "oj_capabilities":
-          parseInput(emptyInputSchema, input, request.params.name);
-          return provider.getCapabilities();
-        case "oj_health":
-          parseInput(emptyInputSchema, input, request.params.name);
-          return provider.getHealth();
-        case "nowcoder_auth_status":
-          parseInput(emptyInputSchema, input, request.params.name);
-          return provider.getAuthStatus({ signal: extra.signal });
-        case "oj_fetch_problem":
-          return provider.fetchProblem(parseInput(fetchProblemInputSchema, input, request.params.name) as NowCoderProblemLocator, {
-            signal: extra.signal
-          });
-        case "oj_search_problems":
-          return provider.search(parseInput(nowCoderSearchInputSchema, input, request.params.name), {
-            signal: extra.signal
-          });
-        case "oj_open_import_window":
-          return provider.openImportWindow(parseInput(ojImportWindowRequestSchema, input, request.params.name));
-        case "oj_complete_import":
-          return provider.completeImport(parseInput(completeImportInputSchema, input, request.params.name).windowId);
-        case "oj_fetch_profile":
-          return provider.fetchProfile(parseInput(nowCoderProfileInputSchema, input, request.params.name), {
-            signal: extra.signal
-          });
-        case "oj_list_submissions":
-          return provider.listSubmissions(parseInput(nowCoderSubmissionsInputSchema, input, request.params.name), {
-            signal: extra.signal
-          });
-        case "oj_prepare_submission":
-          return provider.prepareSubmission(parseInput(nowCoderPrepareSubmissionInputSchema, input, request.params.name), extra.signal);
-        case "oj_commit_submission": {
-          const parsed = parseInput(commitSubmissionInputSchema, input, request.params.name);
-          const confirmation = provider.getSubmissionConfirmation(parsed.intentId);
-          const authorized = await confirmRealSubmission(server, confirmation, extra.signal);
-          return provider.commitSubmission({
-            ...parsed,
-            confirmationProof: "mcp-form-elicitation"
-          }, authorized, extra.signal);
-        }
-        case "oj_poll_submission":
-          return provider.pollSubmission(parseInput(pollSubmissionInputSchema, input, request.params.name), extra.signal);
-        case "oj_platform_run": {
-          const parsed = parseInput(nowCoderRunInputSchema, input, request.params.name);
-          const preview = await provider.preparePlatformRun(parsed, extra.signal);
-          let authorized: boolean;
-          try {
-            authorized = await confirmPlatformRun(server, preview, extra.signal);
-          } catch (error) {
-            provider.cancelPlatformRun(preview.intentId);
-            throw error;
+    return executeOjToolCall(
+      async () => {
+        switch (request.params.name) {
+          case "oj_capabilities":
+            parseInput(strictEmptyInputSchema, input, request.params.name);
+            return provider.getCapabilities();
+          case "oj_health":
+            parseInput(strictEmptyInputSchema, input, request.params.name);
+            return provider.getHealth();
+          case "nowcoder_auth_status":
+            parseInput(strictEmptyInputSchema, input, request.params.name);
+            return provider.getAuthStatus({ signal: extra.signal });
+          case "oj_fetch_problem":
+            return provider.fetchProblem(parseInput(fetchProblemInputSchema, input, request.params.name) as NowCoderProblemLocator, {
+              signal: extra.signal
+            });
+          case "oj_search_problems":
+            return provider.search(parseInput(nowCoderSearchInputSchema, input, request.params.name), {
+              signal: extra.signal
+            });
+          case "oj_open_import_window":
+            return provider.openImportWindow(parseInput(ojImportWindowRequestSchema, input, request.params.name));
+          case "oj_complete_import":
+            return provider.completeImport(parseInput(completeImportInputSchema, input, request.params.name).windowId);
+          case "oj_fetch_profile":
+            return provider.fetchProfile(parseInput(nowCoderProfileInputSchema, input, request.params.name), {
+              signal: extra.signal
+            });
+          case "oj_list_submissions":
+            return provider.listSubmissions(parseInput(nowCoderSubmissionsInputSchema, input, request.params.name), {
+              signal: extra.signal
+            });
+          case "oj_prepare_submission":
+            return provider.prepareSubmission(parseInput(nowCoderPrepareSubmissionInputSchema, input, request.params.name), extra.signal);
+          case "oj_commit_submission": {
+            const parsed = parseInput(commitSubmissionInputSchema, input, request.params.name);
+            const confirmation = provider.getSubmissionConfirmation(parsed.intentId);
+            const authorized = await confirmRealSubmission(server, confirmation, extra.signal);
+            return provider.commitSubmission({
+              ...parsed,
+              confirmationProof: "mcp-form-elicitation"
+            }, authorized, extra.signal);
           }
-          return provider.commitPlatformRun(preview.intentId, authorized, extra.signal);
+          case "oj_poll_submission":
+            return provider.pollSubmission(parseInput(pollSubmissionInputSchema, input, request.params.name), extra.signal);
+          case "oj_platform_run": {
+            const parsed = parseInput(nowCoderRunInputSchema, input, request.params.name);
+            const preview = await provider.preparePlatformRun(parsed, extra.signal);
+            let authorized: boolean;
+            try {
+              authorized = await confirmPlatformRun(server, preview, extra.signal);
+            } catch (error) {
+              provider.cancelPlatformRun(preview.intentId);
+              throw error;
+            }
+            return provider.commitPlatformRun(preview.intentId, authorized, extra.signal);
+          }
+          case "oj_poll_run":
+            return provider.pollPlatformRun(parseInput(pollRunInputSchema, input, request.params.name), extra.signal);
+          default:
+            throw new NowCoderAdapterError("request.invalid", "Unknown NowCoder tool name.");
         }
-        case "oj_poll_run":
-          return provider.pollPlatformRun(parseInput(pollRunInputSchema, input, request.params.name), extra.signal);
-        default:
-          throw new NowCoderAdapterError("request.invalid", "Unknown NowCoder tool name.");
+      },
+      {
+        errorNormalizer,
+        signal: extra.signal,
+        createCancelledError: () => extra.signal?.reason ?? new DOMException("NowCoder tool call was cancelled.", "AbortError")
       }
-    }, extra.signal);
+    );
   });
 
   return server;
@@ -282,112 +322,23 @@ function tool(
   inputSchema: z.ZodType,
   successSchema: z.ZodType,
   openWorldHint: boolean,
-  behavior: "read" | "localAction" | "realSubmit" = "read"
+  behavior: OjToolBehavior = "read"
 ): Tool {
-  return {
+  return defineOjTool({
     name,
     title,
     description,
-    inputSchema: z.toJSONSchema(inputSchema) as Tool["inputSchema"],
-    outputSchema: toOjToolOutputSchema(successSchema) as Tool["outputSchema"],
-    annotations: behavior === "read"
-      ? readAnnotations(openWorldHint)
-      : behavior === "realSubmit"
-        ? realSubmitAnnotations(openWorldHint)
-        : localActionAnnotations(openWorldHint)
-  };
+    inputSchema,
+    outputSchema: successSchema,
+    openWorldHint,
+    behavior
+  });
 }
 
 function parseInput<T>(schema: z.ZodType<T>, input: unknown, toolName: string): T {
-  const parsed = schema.safeParse(input);
-  if (!parsed.success) {
+  return parseStrictToolInput(schema, input, () => {
     throw new NowCoderAdapterError("request.invalid", `${toolName} input did not match its strict bounded schema.`);
-  }
-  return parsed.data;
-}
-
-async function callSafely(operation: () => Promise<object>, signal?: AbortSignal): Promise<CallToolResult> {
-  try {
-    return toToolResult((await operation()) as Record<string, unknown>);
-  } catch (error) {
-    if (signal?.aborted) {
-      throw signal.reason ?? new DOMException("NowCoder tool call was cancelled.", "AbortError");
-    }
-    return mapError(error);
-  }
-}
-
-function mapError(error: unknown): CallToolResult {
-  if (error instanceof NowCoderAdapterError) {
-    return toToolError(toOjError(error));
-  }
-  return toToolError(toOjError(new NowCoderAdapterError("internal", "NowCoder provider failed.")));
-}
-
-function toOjError(error: NowCoderAdapterError): OjError {
-  try {
-    const retryable = error.code === "rate_limited" || error.code === "network.timeout" || error.code === "upstream.unavailable";
-    const parsed = ojErrorSchema.safeParse({
-      schemaVersion: "oj.error/v1",
-      code: error.code,
-      layer: errorLayer(error.code),
-      message: error.message,
-      retryPolicy: error.code === "challenge.required" ? "after_user_action" : retryable ? "safe_read" : "never",
-      userAction: error.code === "challenge.required" ? "solve_challenge" : retryable ? "retry" : error.code === "upstream.schema_changed" || error.code === "internal" ? "open_logs" : "none",
-      platform: "nowcoder",
-      providerId: "nowcoder-public-page",
-      httpStatus: error.options.httpStatus,
-      retryAfterMs: error.options.retryAfterMs
-    });
-    if (parsed.success) return parsed.data;
-  } catch {
-    // Runtime-corrupted error objects must not escape the MCP error boundary.
-  }
-  return {
-    schemaVersion: "oj.error/v1",
-    code: "internal",
-    layer: "broker",
-    message: "NowCoder provider failed to produce a valid error response.",
-    retryPolicy: "never",
-    userAction: "open_logs",
-    platform: "nowcoder",
-    providerId: "nowcoder-public-page"
-  };
-}
-
-function errorLayer(code: OjErrorCode): OjError["layer"] {
-  if (code === "request.invalid" || code === "internal") return "broker";
-  if (code === "policy.blocked" || code.startsWith("confirmation.")) return "policy";
-  if (code.startsWith("auth.") || code === "challenge.required") return "auth";
-  if (code === "network.timeout") return "transport";
-  return "upstream";
-}
-
-function readAnnotations(openWorldHint: boolean) {
-  return {
-    readOnlyHint: true,
-    destructiveHint: false,
-    idempotentHint: true,
-    openWorldHint
-  } as const;
-}
-
-function localActionAnnotations(openWorldHint: boolean) {
-  return {
-    readOnlyHint: false,
-    destructiveHint: false,
-    idempotentHint: false,
-    openWorldHint
-  } as const;
-}
-
-function realSubmitAnnotations(openWorldHint: boolean) {
-  return {
-    readOnlyHint: false,
-    destructiveHint: true,
-    idempotentHint: false,
-    openWorldHint
-  } as const;
+  });
 }
 
 async function confirmRealSubmission(

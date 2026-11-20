@@ -1,4 +1,13 @@
 import type { OjErrorCode } from "@kaiserunix/oj-mcp-contracts";
+import {
+  assertPositiveSafeInteger,
+  BoundedBodyError,
+  createLinkedTimeoutSignal,
+  OjAdapterError,
+  OjRequestCancelledError,
+  parseRetryAfterMs,
+  readBoundedResponseText
+} from "@kaiserunix/oj-mcp-server-common";
 import type { z } from "zod";
 import {
   luoguProblemIdSchema,
@@ -31,21 +40,14 @@ export interface LuoguPageClientOptions {
   maxResponseBytes?: number;
 }
 
-export class LuoguAdapterError extends Error {
-  readonly code: OjErrorCode;
-  readonly httpStatus?: number;
-  readonly retryAfterMs?: number;
-
+export class LuoguAdapterError extends OjAdapterError {
   constructor(
     code: OjErrorCode,
     message: string,
     options: { httpStatus?: number; retryAfterMs?: number; cause?: unknown } = {}
   ) {
-    super(message, { cause: options.cause });
+    super(code, message, options);
     this.name = "LuoguAdapterError";
-    this.code = code;
-    this.httpStatus = options.httpStatus;
-    this.retryAfterMs = options.retryAfterMs;
   }
 }
 
@@ -56,9 +58,9 @@ export class LuoguUpstreamAdmissionError extends LuoguAdapterError {
   }
 }
 
-export class LuoguRequestCancelledError extends Error {
+export class LuoguRequestCancelledError extends OjRequestCancelledError {
   constructor(message: string, options: { cause?: unknown } = {}) {
-    super(message, { cause: options.cause });
+    super(message, options);
     this.name = "LuoguRequestCancelledError";
   }
 }
@@ -71,8 +73,12 @@ export class LuoguPageClient implements LuoguPageReader {
   constructor(options: LuoguPageClientOptions = {}) {
     const fetchImpl = options.fetchImpl ?? globalThis.fetch;
     this.fetchImpl = (input, init) => fetchImpl(input, init);
-    this.timeoutMs = positiveInteger(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, "timeoutMs");
-    this.maxResponseBytes = positiveInteger(options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES, "maxResponseBytes");
+    this.timeoutMs = assertPositiveSafeInteger(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, "timeoutMs", TypeError);
+    this.maxResponseBytes = assertPositiveSafeInteger(
+      options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
+      "maxResponseBytes",
+      TypeError
+    );
   }
 
   async searchProblems(options: {
@@ -114,7 +120,10 @@ export class LuoguPageClient implements LuoguPageReader {
     externalSignal?: AbortSignal
   ): Promise<LuoguPageResponse<T>> {
     assertLuoguSource(url);
-    const abort = linkedAbortSignal(externalSignal, this.timeoutMs);
+    const abort = createLinkedTimeoutSignal(externalSignal, this.timeoutMs, {
+      timeoutMessage: "The Luogu request timed out.",
+      cancelMessage: `${label} was cancelled by the caller.`
+    });
     let response: Response;
     try {
       response = await this.fetchImpl(url.toString(), {
@@ -143,18 +152,32 @@ export class LuoguPageClient implements LuoguPageReader {
         { cause: caught }
       );
     }
+
     try {
       const responseUrl = response.url ? new URL(response.url) : url;
       assertLuoguSource(responseUrl);
-      const declaredLength = parseContentLength(response.headers.get("content-length"));
-      if (declaredLength !== undefined && declaredLength > this.maxResponseBytes) {
-        cancelResponseBody(response);
-        throw new LuoguAdapterError("upstream.schema_changed", `${label} exceeded the ${this.maxResponseBytes}-byte response bound.`, {
-          httpStatus: response.status
-        });
-      }
 
-      const body = await readBoundedBody(response, this.maxResponseBytes, label, abort.signal, abort.source);
+      let body: string;
+      try {
+        body = await readBoundedResponseText(response, {
+          maxBytes: this.maxResponseBytes,
+          signal: abort.signal
+        });
+      } catch (caught) {
+        if (abort.source() === "external") {
+          throw new LuoguRequestCancelledError(`${label} was cancelled by the caller.`, { cause: caught });
+        }
+        if (caught instanceof BoundedBodyError && caught.reason === "too_large") {
+          throw new LuoguAdapterError("upstream.schema_changed", `${label} exceeded the ${this.maxResponseBytes}-byte response bound.`, {
+            httpStatus: response.status
+          });
+        }
+        throw new LuoguAdapterError(
+          abort.source() === "timeout" ? "network.timeout" : "upstream.unavailable",
+          `${label} response could not be read.`,
+          { httpStatus: response.status, cause: caught }
+        );
+      }
 
       const contentType = response.headers.get("content-type") ?? "";
       const looksLikeHtml = contentType.includes("text/html") || /^\s*(?:<!doctype\s+html|<html\b)/i.test(body);
@@ -171,7 +194,7 @@ export class LuoguPageClient implements LuoguPageReader {
       if (response.status === 429) {
         throw new LuoguAdapterError("rate_limited", "Luogu rate-limited the anonymous read.", {
           httpStatus: response.status,
-          retryAfterMs: retryAfterMilliseconds(response.headers.get("retry-after"))
+          retryAfterMs: parseRetryAfterMs(response.headers.get("retry-after"), { clamp: false })
         });
       }
       if (response.status === 408) {
@@ -222,151 +245,8 @@ export class LuoguPageClient implements LuoguPageReader {
   }
 }
 
-async function readBoundedBody(
-  response: Response,
-  maxBytes: number,
-  label: string,
-  signal: AbortSignal,
-  abortSource: () => "external" | "timeout" | undefined
-): Promise<string> {
-  if (!response.body) {
-    return "";
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  const chunks: string[] = [];
-  let receivedBytes = 0;
-  const onAbort = () => void cancelReader(reader, signal.reason);
-  signal.addEventListener("abort", onAbort, { once: true });
-  try {
-    if (signal.aborted) {
-      throw signal.reason ?? new DOMException("The Luogu read was cancelled.", "AbortError");
-    }
-    while (true) {
-      const { done, value } = await reader.read();
-      if (signal.aborted) {
-        throw signal.reason ?? new DOMException("The Luogu read was cancelled.", "AbortError");
-      }
-      if (done) {
-        break;
-      }
-      receivedBytes += value.byteLength;
-      if (receivedBytes > maxBytes) {
-        cancelReader(reader);
-        throw new LuoguAdapterError("upstream.schema_changed", `${label} exceeded the ${maxBytes}-byte response bound.`, {
-          httpStatus: response.status
-        });
-      }
-      chunks.push(decoder.decode(value, { stream: true }));
-    }
-    chunks.push(decoder.decode());
-    return chunks.join("");
-  } catch (caught) {
-    if (caught instanceof LuoguAdapterError || caught instanceof LuoguRequestCancelledError) {
-      throw caught;
-    }
-    cancelReader(reader);
-    if (abortSource() === "external") {
-      throw new LuoguRequestCancelledError(`${label} was cancelled by the caller.`, { cause: caught });
-    }
-    throw new LuoguAdapterError(
-      abortSource() === "timeout" ? "network.timeout" : "upstream.unavailable",
-      `${label} response could not be read.`,
-      { httpStatus: response.status, cause: caught }
-    );
-  } finally {
-    signal.removeEventListener("abort", onAbort);
-    reader.releaseLock();
-  }
-}
-
-function cancelResponseBody(response: Response): void {
-  if (!response.body || response.body.locked) return;
-  cancelBestEffort(() => response.body!.cancel());
-}
-
-function linkedAbortSignal(externalSignal: AbortSignal | undefined, timeoutMs: number): {
-  signal: AbortSignal;
-  didTimeout: () => boolean;
-  source: () => "external" | "timeout" | undefined;
-  dispose: () => void;
-} {
-  const controller = new AbortController();
-  let source: "external" | "timeout" | undefined;
-  const onExternalAbort = () => {
-    if (source) return;
-    source = "external";
-    controller.abort(externalSignal?.reason);
-  };
-  if (externalSignal?.aborted) {
-    onExternalAbort();
-  } else {
-    externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
-  }
-  const timeout = setTimeout(() => {
-    if (source) return;
-    source = "timeout";
-    controller.abort(new DOMException("The Luogu request timed out.", "TimeoutError"));
-  }, timeoutMs);
-  return {
-    signal: controller.signal,
-    didTimeout: () => source === "timeout",
-    source: () => source,
-    dispose: () => {
-      clearTimeout(timeout);
-      externalSignal?.removeEventListener("abort", onExternalAbort);
-    }
-  };
-}
-
-function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>, reason?: unknown): void {
-  cancelBestEffort(() => reader.cancel(reason));
-}
-
-function cancelBestEffort(cancel: () => Promise<void>): void {
-  try {
-    void cancel().catch(() => {
-      // Preserve the bounded-read error if cleanup rejects.
-    });
-  } catch {
-    // Preserve the bounded-read error if cleanup throws synchronously.
-  }
-}
-
 function assertLuoguSource(url: URL): void {
   if (url.origin !== LUOGU_ORIGIN || url.protocol !== "https:" || url.username || url.password || url.port) {
     throw new LuoguAdapterError("policy.blocked", "Luogu adapter refused a response outside the fixed www.luogu.com.cn HTTPS origin.");
   }
-}
-
-function positiveInteger(value: number, name: string): number {
-  if (!Number.isSafeInteger(value) || value < 1) {
-    throw new TypeError(`${name} must be a positive safe integer.`);
-  }
-  return value;
-}
-
-function parseContentLength(value: string | null): number | undefined {
-  if (!value || !/^\d+$/.test(value)) {
-    return undefined;
-  }
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) ? parsed : undefined;
-}
-
-function retryAfterMilliseconds(value: string | null): number | undefined {
-  if (!value) {
-    return undefined;
-  }
-  const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0 && seconds <= 86_400) {
-    return seconds * 1_000;
-  }
-  const date = Date.parse(value);
-  if (!Number.isFinite(date)) {
-    return undefined;
-  }
-  const delay = date - Date.now();
-  return delay >= 0 && delay <= 86_400_000 ? delay : undefined;
 }

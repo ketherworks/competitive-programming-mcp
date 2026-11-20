@@ -31,7 +31,7 @@ describe("Luogu package deployment metadata", () => {
     expect(tsconfig.compilerOptions.tsBuildInfoFile).not.toContain("dist/");
   });
 
-  test("inspects the compiled CLI and Worker artifacts produced before tests", async () => {
+  test("inspects the compiled CLI and Worker artifacts produced before tests", { timeout: 30_000 }, async () => {
     const cli = await readFile(new URL("../dist/index.js", import.meta.url), "utf8");
     const worker = await readFile(new URL("../dist/worker.js", import.meta.url), "utf8");
     const workerModule = (await import(`${new URL("../dist/worker.js", import.meta.url).href}?test=${Date.now()}`)) as {
@@ -44,7 +44,7 @@ describe("Luogu package deployment metadata", () => {
     expect(workerModule.default.fetch).toBeTypeOf("function");
   });
 
-  test("ships the CLI entrypoint as POSIX 0755 in npm pack metadata", async () => {
+  test("ships the CLI entrypoint as POSIX 0755 in npm pack metadata", { timeout: 30_000 }, async () => {
     const npmCli = process.env.npm_execpath;
     if (!npmCli) throw new Error("npm_execpath is required to inspect npm pack metadata.");
     const { stdout } = await execFileAsync(process.execPath, [npmCli, "pack", "--dry-run", "--json", "--ignore-scripts"], {

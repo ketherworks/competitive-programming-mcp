@@ -1,16 +1,17 @@
 import {
-  ojCapabilitiesSchema,
+  buildOjCapabilities,
+  defaultCapabilityRisk,
   ojProviderHealthSchema,
   ojSearchResultSchema,
   type OjCapabilities,
   type OjCapability,
   type OjCapabilityName,
-  type OjOperationRisk,
   type OjProblemDocument,
   type OjProviderHealth,
   type OjSearchResult,
   type OjSourceRef
 } from "@kaiserunix/oj-mcp-contracts";
+import { MonotonicHealthStore, SingleFlightCoalescer } from "@kaiserunix/oj-mcp-server-common";
 import { z } from "zod";
 import {
   AtCoderClientError,
@@ -65,20 +66,12 @@ export interface AtCoderProviderOptions {
   nowIso?: () => string;
 }
 
-interface SharedRead {
-  controller: AbortController;
-  consumers: number;
-  settled: boolean;
-  promise: Promise<OjProblemDocument>;
-}
-
 export class AtCoderProvider {
   private readonly client: AtCoderHtmlClient;
   private readonly now: () => number;
   private readonly nowIso: () => string;
-  private lastObservation?: { sequence: number; latencyMs: number; error?: AtCoderClientError };
-  private nextSequence = 0;
-  private readonly inFlight = new Map<string, SharedRead>();
+  private readonly healthStore = new MonotonicHealthStore<AtCoderClientError>();
+  private readonly singleFlight = new SingleFlightCoalescer<OjProblemDocument>();
 
   constructor(options: AtCoderProviderOptions = {}) {
     this.client = options.client ?? new AtCoderHtmlClient();
@@ -102,31 +95,26 @@ export class AtCoderProvider {
     }
 
     const key = `${locator.contestId}/${locator.taskId}?lang=${locator.locale}`;
-    let shared = this.inFlight.get(key);
-    if (!shared) {
-      shared = this.createSharedRead(key, locator);
-      this.inFlight.set(key, shared);
-    }
-    return consumeSharedRead(shared, signal);
-  }
-
-  private createSharedRead(key: string, locator: AtCoderTaskLocator): SharedRead {
-    const controller = new AbortController();
-    const shared: SharedRead = { controller, consumers: 0, settled: false, promise: undefined as never };
-    const sequence = ++this.nextSequence;
-    shared.promise = this.loadProblem(locator, controller.signal, sequence).finally(() => {
-      shared.settled = true;
-      if (this.inFlight.get(key) === shared) this.inFlight.delete(key);
-    });
-    return shared;
+    return this.singleFlight.run(
+      key,
+      (upstreamSignal) => this.loadProblem(locator, upstreamSignal, this.healthStore.begin()),
+      {
+        signal,
+        createCancelledError: cancelledRead,
+        abortMessage: "All AtCoder read consumers cancelled."
+      }
+    );
   }
 
   private async loadProblem(locator: AtCoderTaskLocator, signal: AbortSignal, sequence: number): Promise<OjProblemDocument> {
     const startedAt = this.now();
     try {
       const page = await this.client.fetchTask(locator, signal);
-      const document = await parseAtCoderProblem(page, { fetchedAt: this.nowIso(), adapterVersion: "0.1.0" });
-      if (!signal.aborted) this.recordObservation({ sequence, latencyMs: this.now() - startedAt });
+      const fetchedAt = this.nowIso();
+      const document = await parseAtCoderProblem(page, { fetchedAt, adapterVersion: "0.1.0" });
+      if (!signal.aborted) {
+        this.healthStore.recordSuccess(sequence, fetchedAt, this.now() - startedAt);
+      }
       return document;
     } catch (error) {
       const mapped =
@@ -140,30 +128,20 @@ export class AtCoderProvider {
         mapped.code !== "request.invalid" &&
         mapped.transportCause !== "consumer_cancelled"
       ) {
-        this.recordObservation({ sequence, latencyMs: this.now() - startedAt, error: mapped });
+        this.healthStore.recordError(sequence, this.nowIso(), mapped, this.now() - startedAt);
       }
       throw mapped;
     }
   }
 
-  private recordObservation(observation: { sequence: number; latencyMs: number; error?: AtCoderClientError }): void {
-    if (!this.lastObservation || observation.sequence >= this.lastObservation.sequence) this.lastObservation = observation;
-  }
-
   async getCapabilities(transport: OjCapability["transport"]): Promise<OjCapabilities> {
     const checkedAt = this.nowIso();
-    const operations = Object.fromEntries(
-      CAPABILITY_NAMES.map((name) => [name, capability(name, checkedAt, transport)])
-    ) as Record<OjCapabilityName, OjCapability>;
-    return ojCapabilitiesSchema.parse({
-      schemaVersion: "oj.capabilities/v1",
+    return buildOjCapabilities({
       providerId: "atcoder-page-adapter",
       providerVersion: "0.1.0",
       platform: "atcoder",
-      protocolVersion: "2025-11-25",
-      operations,
-      languages: [],
-      source: providerSource(checkedAt)
+      source: providerSource(checkedAt),
+      buildOperation: (name) => capability(name, checkedAt, transport)
     });
   }
 
@@ -214,8 +192,8 @@ export class AtCoderProvider {
   }
 
   async getHealth(): Promise<OjProviderHealth> {
-    const observation = this.lastObservation;
-    if (observation?.error) return errorHealth(observation.error, observation.latencyMs, this.nowIso());
+    const observation = this.healthStore.snapshot();
+    if (observation?.error) return errorHealth(observation.error, observation.latencyMs ?? 0, this.nowIso());
     return ojProviderHealthSchema.parse({
       schemaVersion: "oj.provider-health/v1",
       providerId: "atcoder-page-adapter",
@@ -229,7 +207,7 @@ export class AtCoderProvider {
         auth: "not_required",
         upstream: "pass"
       },
-      ...(observation ? { latencyMs: observation.latencyMs } : {}),
+      ...(observation?.latencyMs !== undefined ? { latencyMs: observation.latencyMs } : {}),
       message: observation
         ? "The latest anonymous AtCoder task read passed transport, HTML, and shared-schema validation."
         : "AtCoder adapter is ready; upstream not yet observed in this process."
@@ -244,27 +222,6 @@ function resolveLocator(input: AtCoderFetchProblemInput): AtCoderTaskLocator {
     taskId: input.taskId!,
     locale: (input.locale ?? "en") as AtCoderLocale
   };
-}
-
-async function consumeSharedRead(shared: SharedRead, signal?: AbortSignal): Promise<OjProblemDocument> {
-  shared.consumers += 1;
-  let removeAbortListener: (() => void) | undefined;
-  try {
-    if (!signal) return await shared.promise;
-    if (signal.aborted) throw cancelledRead();
-    const cancelled = new Promise<never>((_resolve, reject) => {
-      const onAbort = () => reject(cancelledRead());
-      signal.addEventListener("abort", onAbort, { once: true });
-      removeAbortListener = () => signal.removeEventListener("abort", onAbort);
-    });
-    return await Promise.race([shared.promise, cancelled]);
-  } finally {
-    removeAbortListener?.();
-    shared.consumers -= 1;
-    if (shared.consumers === 0 && !shared.settled) {
-      shared.controller.abort(new DOMException("All AtCoder read consumers cancelled.", "AbortError"));
-    }
-  }
 }
 
 function cancelledRead(): AtCoderClientError {
@@ -288,19 +245,6 @@ function exactSearchLocator(query: string, locale?: AtCoderLocale): AtCoderTaskL
   return { contestId: match[1]!, taskId: match[2]!, locale: locale ?? "en" };
 }
 
-const CAPABILITY_NAMES: OjCapabilityName[] = [
-  "searchProblems",
-  "fetchProblem",
-  "importProblem",
-  "fetchProfile",
-  "listSubmissions",
-  "localRun",
-  "platformRun",
-  "prepareSubmission",
-  "commitSubmission",
-  "pollSubmission"
-];
-
 function capability(name: OjCapabilityName, checkedAt: string, transport: OjCapability["transport"]): OjCapability {
   if (name === "searchProblems" || name === "fetchProblem") {
     return {
@@ -323,19 +267,11 @@ function capability(name: OjCapabilityName, checkedAt: string, transport: OjCapa
     status: "unsupported",
     transport,
     auth: "none",
-    risk: riskFor(name),
+    risk: defaultCapabilityRisk(name),
     compliance: "unofficial",
     reason: "This anonymous AtCoder page adapter exposes public problem reads only.",
     checkedAt
   };
-}
-
-function riskFor(name: OjCapabilityName): OjOperationRisk {
-  if (name === "localRun" || name === "platformRun") return "R2_local_execute";
-  if (name === "prepareSubmission") return "R3_prepare_write";
-  if (name === "commitSubmission") return "R4_real_submit";
-  if (name === "fetchProfile" || name === "listSubmissions" || name === "pollSubmission") return "R1_private_read";
-  return "R0_public_read";
 }
 
 function providerSource(fetchedAt: string): OjSourceRef {

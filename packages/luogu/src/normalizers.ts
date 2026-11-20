@@ -6,6 +6,7 @@ import {
   type OjSourceRef,
   type OjTextBlock
 } from "@kaiserunix/oj-mcp-contracts";
+import { sha256Hex } from "@kaiserunix/oj-mcp-server-common";
 import { LuoguAdapterError } from "./client.js";
 import { luoguProblemPayloadSchema, luoguProblemSearchPayloadSchema } from "./upstreamSchemas.js";
 
@@ -162,14 +163,13 @@ function joinSections(...sections: string[]): string {
 async function textBlock(original: string, maxChars: number): Promise<OjTextBlock> {
   const truncated = original.length > maxChars;
   const text = truncated ? original.slice(0, maxChars) : original;
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return {
     text,
     format: "markdown",
     locale: DEFAULT_LOCALE,
     truncated,
     originalChars: truncated ? original.length : undefined,
-    sha256: Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
+    sha256: await sha256Hex(text)
   };
 }
 
