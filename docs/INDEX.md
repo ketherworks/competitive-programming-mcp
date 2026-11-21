@@ -6,6 +6,9 @@
 | --- | --- | --- |
 | [deployment/production-endpoints.md](deployment/production-endpoints.md) | Canonical public MCP/health endpoints, hosting topology, retired shared Workers, and release smoke requirements. | Active |
 | [providers/leetcode.md](providers/leetcode.md) | Compatibility, security, and local stdio boundary for integrating upstream `jinzcdev/leetcode-mcp-server` v1.3.0 with OJ v1 contracts. | Active |
+| [PRODUCT_STRATEGY.md](PRODUCT_STRATEGY.md) | Multi-OJ portfolio positioning, honest capability matrix, and P0–P2 product roadmap across hosted and local providers. | Active |
+| [UX_EXPERIENCE_AND_DESIGN_SPEC.md](UX_EXPERIENCE_AND_DESIGN_SPEC.md) | Code-truthful UX audit, user personas, friction analysis, and experience design specification across OJ providers. | Active |
+| [USER_JOURNEY_COPY.md](USER_JOURNEY_COPY.md) | Bilingual product copy playbook, per-client MCP configuration cards, JSON-RPC templates, and user checklists. | Active |
 | [CLEANUP_CHANGELOG.md](CLEANUP_CHANGELOG.md) | Code-vs-docs audit log recording verified docs, endpoint clarifications, and out-of-scope drift notes. | Historical |
 
 ## Package Guides (`packages/`)
