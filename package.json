@@ -12,6 +12,7 @@
     "postbuild": "node scripts/bundle-platform.mjs codeforces && node scripts/bundle-platform.mjs atcoder && node scripts/bundle-platform.mjs nowcoder && node scripts/bundle-platform.mjs luogu",
     "test": "vitest run",
     "check": "npm run clean && npm run build && npm test",
+    "smoke:check": "node tools/oj-health/dist/cli.js",
     "sync:contracts": "node scripts/sync-contracts.mjs"
   },
   "devDependencies": {
