@@ -1,17 +1,18 @@
 import {
-  ojCapabilitiesSchema,
+  buildOjCapabilities,
+  defaultCapabilityRisk,
   ojProviderHealthSchema,
   ojSearchRequestSchema,
   ojSearchResultSchema,
   type OjCapabilities,
   type OjCapability,
   type OjCapabilityName,
-  type OjOperationRisk,
   type OjProblemDocument,
   type OjProviderHealth,
   type OjSearchRequest,
   type OjSearchResult
 } from "@kaiserunix/oj-mcp-contracts";
+import { MonotonicHealthStore } from "@kaiserunix/oj-mcp-server-common";
 import { z } from "zod";
 import {
   LuoguAdapterError,
@@ -25,7 +26,6 @@ import { luoguProblemIdSchema } from "./upstreamSchemas.js";
 
 const PROVIDER_ID = "luogu-lentille-page-adapter";
 const PROVIDER_VERSION = "0.1.0";
-const PROTOCOL_VERSION = "2025-11-25";
 const DEFAULT_SOURCE_URL = "https://www.luogu.com.cn/problem/list";
 
 export const luoguSearchInputSchema = z
@@ -58,34 +58,28 @@ export interface LuoguProviderOptions {
 type Observation = { state: "success"; checkedAt: string } | { state: "error"; checkedAt: string; error: LuoguAdapterError };
 
 export class LuoguHealthStore {
-  private nextSequence = 0;
-  private committedSequence = 0;
-  private observation?: Observation;
+  private readonly store = new MonotonicHealthStore<LuoguAdapterError>();
 
   begin(): number {
-    this.nextSequence += 1;
-    return this.nextSequence;
+    return this.store.begin();
   }
 
   recordSuccess(sequence: number, checkedAt: string): void {
-    this.commit(sequence, { state: "success", checkedAt });
+    this.store.recordSuccess(sequence, checkedAt);
   }
 
   recordError(sequence: number, checkedAt: string, error: LuoguAdapterError): void {
     if (!(error instanceof LuoguUpstreamAdmissionError) && isUpstreamHealthOutcome(error.code)) {
-      this.commit(sequence, { state: "error", checkedAt, error });
+      this.store.recordError(sequence, checkedAt, error);
     }
   }
 
   snapshot(): Observation | undefined {
-    return this.observation;
-  }
-
-  private commit(sequence: number, observation: Observation): void {
-    if (sequence >= this.committedSequence) {
-      this.committedSequence = sequence;
-      this.observation = observation;
-    }
+    const current = this.store.snapshot();
+    if (!current) return undefined;
+    return current.error
+      ? { state: "error", checkedAt: current.checkedAt, error: current.error }
+      : { state: "success", checkedAt: current.checkedAt };
   }
 }
 
@@ -192,22 +186,16 @@ export class LuoguProvider {
 
   async getCapabilities(): Promise<OjCapabilities> {
     const checkedAt = this.nowIso();
-    const operations = Object.fromEntries(
-      capabilityNames.map((name) => [name, capability(name, checkedAt, this.transport)])
-    ) as Record<OjCapabilityName, OjCapability>;
-    return ojCapabilitiesSchema.parse({
-      schemaVersion: "oj.capabilities/v1",
+    return buildOjCapabilities({
       providerId: PROVIDER_ID,
       providerVersion: PROVIDER_VERSION,
       platform: "luogu",
-      protocolVersion: PROTOCOL_VERSION,
-      operations,
-      languages: [],
       source: luoguSourceRef({
         fetchedAt: checkedAt,
         adapterVersion: PROVIDER_VERSION,
         sourceUrl: DEFAULT_SOURCE_URL
-      })
+      }),
+      buildOperation: (name) => capability(name, checkedAt, this.transport)
     });
   }
 
@@ -281,25 +269,12 @@ function isUpstreamHealthOutcome(code: LuoguAdapterError["code"]): boolean {
   );
 }
 
-const capabilityNames: OjCapabilityName[] = [
-  "searchProblems",
-  "fetchProblem",
-  "importProblem",
-  "fetchProfile",
-  "listSubmissions",
-  "localRun",
-  "platformRun",
-  "prepareSubmission",
-  "commitSubmission",
-  "pollSubmission"
-];
-
 function capability(
   name: OjCapabilityName,
   checkedAt: string,
   transport: "local_stdio" | "remote_http"
 ): OjCapability {
-  const risk = capabilityRisk(name);
+  const risk = defaultCapabilityRisk(name);
   if (name === "searchProblems" || name === "fetchProblem") {
     return {
       name,
@@ -351,14 +326,6 @@ function capabilityAuth(name: OjCapabilityName): OjCapability["auth"] {
     return "session_cookie";
   }
   return "none";
-}
-
-function capabilityRisk(name: OjCapabilityName): OjOperationRisk {
-  if (name === "fetchProfile" || name === "listSubmissions" || name === "pollSubmission") return "R1_private_read";
-  if (name === "localRun" || name === "platformRun") return "R2_local_execute";
-  if (name === "prepareSubmission") return "R3_prepare_write";
-  if (name === "commitSubmission") return "R4_real_submit";
-  return "R0_public_read";
 }
 
 function parseSearchInput(input: OjSearchRequest): z.infer<typeof luoguSearchInputSchema> {

@@ -188,6 +188,39 @@ describe("NowCoderProvider", () => {
     expect(health.layers.upstream).toBe(expected.upstream);
     if (expected.retryAfterMs) expect(health.retryAfterMs).toBe(expected.retryAfterMs);
   });
+
+  test("preserves monotonic health when an older failing fetch finishes after a newer success", async () => {
+    const html = await loadFixture("acm-problem.html");
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let calls = 0;
+    const provider = new NowCoderProvider({
+      client: new NowCoderPageClient({
+        requester: async () => {
+          calls += 1;
+          if (calls === 1) {
+            await firstGate;
+            return { status: 503, body: "unavailable", headers: { "content-type": "text/html" } };
+          }
+          return { status: 200, body: html, headers: { "content-type": "text/html" } };
+        }
+      }),
+      nowIso
+    });
+
+    const staleFailure = provider.fetchProblem({ url });
+    await provider.fetchProblem({ url });
+    releaseFirst();
+    await expect(staleFailure).rejects.toMatchObject({ code: "upstream.unavailable" });
+
+    const health = await provider.getHealth();
+    expect(health).toMatchObject({
+      overall: "healthy",
+      layers: { schema: "pass", upstream: "pass" }
+    });
+  });
 });
 
 function clientReturning(status: number, body: string, headers: Record<string, string>): NowCoderPageClient {

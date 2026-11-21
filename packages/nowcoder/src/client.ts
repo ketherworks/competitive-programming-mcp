@@ -3,6 +3,13 @@ import { request as httpsRequest, type RequestOptions as HttpsRequestOptions } f
 import { isIP, type LookupFunction } from "node:net";
 import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from "node:http";
 import type { SecureContextOptions } from "node:tls";
+import { sanitizeHttpStatus } from "@kaiserunix/oj-mcp-contracts";
+import {
+  abortable,
+  createLinkedTimeoutSignal,
+  isTimeoutError,
+  parseRetryAfterMs
+} from "@kaiserunix/oj-mcp-server-common";
 import { MAX_RETRY_AFTER_MS, NowCoderAdapterError } from "./errors.js";
 import { isChallengeHtml } from "./parser.js";
 import { nowCoderSearchUrl } from "./search.js";
@@ -142,18 +149,9 @@ export class NowCoderPageClient {
 
   async getSessionStatus(options: { signal?: AbortSignal } = {}): Promise<NowCoderSessionStatus> {
     if (this.sessionCookie === undefined) return { configured: false, state: "not_configured" };
-    const controller = new AbortController();
-    const cancelFromCaller = () => {
-      controller.abort(options.signal?.reason ?? new DOMException("NowCoder request cancelled.", "AbortError"));
-    };
-    if (options.signal?.aborted) cancelFromCaller();
-    else options.signal?.addEventListener("abort", cancelFromCaller, { once: true });
-    const deadline = setTimeout(() => {
-      controller.abort(new DOMException("NowCoder request deadline exceeded.", "TimeoutError"));
-    }, this.limits.timeoutMs);
-    try {
-      const response = await this.request(new URL("https://ac.nowcoder.com/"), controller.signal, options.signal);
-      const responseStatus = validHttpStatus(response.status);
+    return this.withRequestDeadline(options.signal, "NowCoder request deadline exceeded.", async (signal) => {
+      const response = await this.request(new URL("https://ac.nowcoder.com/"), signal, options.signal);
+      const responseStatus = sanitizeHttpStatus(response.status);
       if (responseStatus === undefined) {
         throw new NowCoderAdapterError("upstream.unavailable", "NowCoder returned an invalid HTTP status.");
       }
@@ -176,10 +174,7 @@ export class NowCoderPageClient {
         return { configured: true, state: "expired" };
       }
       return { configured: true, state: "unknown" };
-    } finally {
-      clearTimeout(deadline);
-      options.signal?.removeEventListener("abort", cancelFromCaller);
-    }
+    });
   }
 
   hasSessionCookie(): boolean {
@@ -204,18 +199,9 @@ export class NowCoderPageClient {
       throw new NowCoderAdapterError("request.invalid", "Use a 1-300 character query, page 1-10000, and limit 1-50.");
     }
     const url = new URL(nowCoderSearchUrl(query, input.page, input.limit));
-    const controller = new AbortController();
-    const cancelFromCaller = () => {
-      controller.abort(options.signal?.reason ?? new DOMException("NowCoder request cancelled.", "AbortError"));
-    };
-    if (options.signal?.aborted) cancelFromCaller();
-    else options.signal?.addEventListener("abort", cancelFromCaller, { once: true });
-    const deadline = setTimeout(() => {
-      controller.abort(new DOMException("NowCoder request deadline exceeded.", "TimeoutError"));
-    }, this.limits.timeoutMs);
-    try {
-      const response = await this.request(url, controller.signal, options.signal);
-      const responseStatus = validHttpStatus(response.status);
+    return this.withRequestDeadline(options.signal, "NowCoder request deadline exceeded.", async (signal) => {
+      const response = await this.request(url, signal, options.signal);
+      const responseStatus = sanitizeHttpStatus(response.status);
       if (responseStatus === undefined) {
         throw new NowCoderAdapterError("upstream.unavailable", "NowCoder returned an invalid HTTP status.");
       }
@@ -235,10 +221,7 @@ export class NowCoderPageClient {
         throw new NowCoderAdapterError("upstream.schema_changed", "NowCoder returned a non-HTML problem-search response.");
       }
       return { html: response.body, url: url.href };
-    } finally {
-      clearTimeout(deadline);
-      options.signal?.removeEventListener("abort", cancelFromCaller);
-    }
+    });
   }
 
   async getProfilePage(
@@ -252,36 +235,13 @@ export class NowCoderPageClient {
       throw new NowCoderAdapterError("auth.required", "Configure a local NowCoder session or provide a public accountId.");
     }
 
-    const controller = new AbortController();
-    const cancelFromCaller = () => {
-      controller.abort(options.signal?.reason ?? new DOMException("NowCoder request cancelled.", "AbortError"));
-    };
-    if (options.signal?.aborted) cancelFromCaller();
-    else options.signal?.addEventListener("abort", cancelFromCaller, { once: true });
-    const deadline = setTimeout(() => {
-      controller.abort(new DOMException("NowCoder request deadline exceeded.", "TimeoutError"));
-    }, this.limits.timeoutMs);
-    try {
-      let resolvedId = accountId;
-      if (resolvedId === undefined) {
-        const home = await this.request(new URL("https://ac.nowcoder.com/"), controller.signal, options.signal);
-        this.assertHtmlResponse(home, "profile discovery");
-        if (/\bwindow\.isLogin\s*=\s*false\b/.test(home.body)) {
-          throw new NowCoderAdapterError("auth.invalid", "The configured NowCoder session has expired.");
-        }
-        resolvedId = authenticatedOwnerId(home.body);
-        if (!resolvedId) {
-          throw new NowCoderAdapterError("auth.invalid", "The configured NowCoder session did not expose a competition profile.");
-        }
-      }
+    return this.withRequestDeadline(options.signal, "NowCoder request deadline exceeded.", async (signal) => {
+      const resolvedId = await this.resolveProfileAccountId(accountId, signal, options.signal);
       const url = new URL(`https://ac.nowcoder.com/acm/contest/profile/${resolvedId}`);
-      const page = await this.request(url, controller.signal, options.signal);
+      const page = await this.request(url, signal, options.signal);
       this.assertHtmlResponse(page, "profile");
       return { accountId: resolvedId, html: page.body, url: url.href };
-    } finally {
-      clearTimeout(deadline);
-      options.signal?.removeEventListener("abort", cancelFromCaller);
-    }
+    });
   }
 
   async getSubmissionsPage(
@@ -296,15 +256,8 @@ export class NowCoderPageClient {
     ) {
       throw new NowCoderAdapterError("request.invalid", "Use a valid accountId, page 1-10000, limit 1-50, and query up to 100 characters.");
     }
-    const controller = new AbortController();
-    const cancelFromCaller = () => {
-      controller.abort(options.signal?.reason ?? new DOMException("NowCoder request cancelled.", "AbortError"));
-    };
-    if (options.signal?.aborted) cancelFromCaller();
-    else options.signal?.addEventListener("abort", cancelFromCaller, { once: true });
-    const deadline = setTimeout(() => controller.abort(new DOMException("NowCoder request deadline exceeded.", "TimeoutError")), this.limits.timeoutMs);
-    try {
-      const accountId = await this.resolveProfileAccountId(input.accountId, controller.signal, options.signal);
+    return this.withRequestDeadline(options.signal, "NowCoder request deadline exceeded.", async (signal) => {
+      const accountId = await this.resolveProfileAccountId(input.accountId, signal, options.signal);
       const url = new URL(`https://ac.nowcoder.com/acm/contest/profile/${accountId}/practice-coding`);
       url.searchParams.set("pageSize", String(input.limit));
       url.searchParams.set("search", input.query?.trim() ?? "");
@@ -312,33 +265,21 @@ export class NowCoderPageClient {
       url.searchParams.set("languageCategoryFilter", "-1");
       url.searchParams.set("orderType", "DESC");
       url.searchParams.set("page", String(input.page));
-      const page = await this.request(url, controller.signal, options.signal);
+      const page = await this.request(url, signal, options.signal);
       this.assertHtmlResponse(page, "submission-history");
       return { accountId, html: page.body, url: url.href };
-    } finally {
-      clearTimeout(deadline);
-      options.signal?.removeEventListener("abort", cancelFromCaller);
-    }
+    });
   }
 
   async getProblemPage(inputUrl: string, options: { signal?: AbortSignal } = {}): Promise<NowCoderProblemPageResponse> {
-    let page;
+    let page: ReturnType<typeof parseNowCoderProblemUrl>;
     try {
       page = parseNowCoderProblemUrl(inputUrl);
     } catch {
       throw new NowCoderAdapterError("request.invalid", "Use an allowlisted public ac.nowcoder.com ACM problem URL.");
     }
 
-    const controller = new AbortController();
-    const cancelFromCaller = () => {
-      controller.abort(options.signal?.reason ?? new DOMException("NowCoder request cancelled.", "AbortError"));
-    };
-    if (options.signal?.aborted) cancelFromCaller();
-    else options.signal?.addEventListener("abort", cancelFromCaller, { once: true });
-    const deadline = setTimeout(() => {
-      controller.abort(new DOMException("NowCoder request deadline exceeded.", "TimeoutError"));
-    }, this.limits.timeoutMs);
-    try {
+    return this.withRequestDeadline(options.signal, "NowCoder request deadline exceeded.", async (signal) => {
       const visited = new Set<string>();
       for (let redirects = 0; redirects <= this.maxRedirects; redirects += 1) {
         const currentUrl = new URL(page.canonicalUrl);
@@ -347,8 +288,8 @@ export class NowCoderPageClient {
         }
         visited.add(currentUrl.href);
 
-        const response = await this.request(currentUrl, controller.signal, options.signal);
-        const responseStatus = validHttpStatus(response.status);
+        const response = await this.request(currentUrl, signal, options.signal);
+        const responseStatus = sanitizeHttpStatus(response.status);
         if (responseStatus === undefined) {
           throw new NowCoderAdapterError("upstream.unavailable", "NowCoder returned an invalid HTTP status.");
         }
@@ -392,10 +333,7 @@ export class NowCoderPageClient {
       }
 
       throw new NowCoderAdapterError("internal", "NowCoder redirect handling reached an invalid state.");
-    } finally {
-      clearTimeout(deadline);
-      options.signal?.removeEventListener("abort", cancelFromCaller);
-    }
+    });
   }
 
   async obtainJudgeAccessToken(options: { signal?: AbortSignal; teamId?: string } = {}): Promise<string> {
@@ -496,7 +434,7 @@ export class NowCoderPageClient {
     if (response.status === 429) {
       throw new NowCoderAdapterError("rate_limited", "NowCoder rate limited the public page request.", {
         httpStatus: 429,
-        retryAfterMs: retryAfterMilliseconds(response.headers)
+        retryAfterMs: parseRetryAfterMs(header(response.headers, "retry-after"), { maxMs: MAX_RETRY_AFTER_MS })
       });
     }
     if (response.status === 401) {
@@ -512,19 +450,30 @@ export class NowCoderPageClient {
     }
   }
 
+  private async withRequestDeadline<T>(
+    callerSignal: AbortSignal | undefined,
+    timeoutMessage: string,
+    operation: (signal: AbortSignal) => Promise<T>
+  ): Promise<T> {
+    const abort = createLinkedTimeoutSignal(callerSignal, this.limits.timeoutMs, {
+      timeoutMessage,
+      cancelMessage: "NowCoder request cancelled."
+    });
+    try {
+      return await operation(abort.signal);
+    } finally {
+      abort.dispose();
+    }
+  }
+
   private async jsonAction(
     url: URL,
     init: { method: "GET" | "POST"; body?: string; headers?: Readonly<Record<string, string>> },
     options: { signal?: AbortSignal }
   ): Promise<unknown> {
     if (this.sessionCookie === undefined) throw new NowCoderAdapterError("auth.required", "Configure a local NowCoder session for judge operations.");
-    const controller = new AbortController();
-    const cancelFromCaller = () => controller.abort(options.signal?.reason ?? new DOMException("NowCoder request cancelled.", "AbortError"));
-    if (options.signal?.aborted) cancelFromCaller();
-    else options.signal?.addEventListener("abort", cancelFromCaller, { once: true });
-    const deadline = setTimeout(() => controller.abort(new DOMException("NowCoder judge request deadline exceeded.", "TimeoutError")), this.limits.timeoutMs);
-    try {
-      const response = await this.request(url, controller.signal, options.signal, {
+    return this.withRequestDeadline(options.signal, "NowCoder judge request deadline exceeded.", async (signal) => {
+      const response = await this.request(url, signal, options.signal, {
         ...init,
         headers: {
           Accept: "application/json",
@@ -535,7 +484,7 @@ export class NowCoderPageClient {
           ...init.headers
         }
       });
-      const responseStatus = validHttpStatus(response.status);
+      const responseStatus = sanitizeHttpStatus(response.status);
       if (responseStatus === undefined) throw new NowCoderAdapterError("upstream.unavailable", "NowCoder judge service returned an invalid HTTP status.");
       if (Buffer.byteLength(response.body, "utf8") > this.limits.maxBytes) throw new NowCoderAdapterError("upstream.unavailable", "NowCoder judge response exceeded the safe size limit.");
       this.assertSuccessfulResponse({ ...response, status: responseStatus });
@@ -546,10 +495,7 @@ export class NowCoderPageClient {
       } catch {
         throw new NowCoderAdapterError("upstream.schema_changed", "NowCoder judge service returned malformed JSON.");
       }
-    } finally {
-      clearTimeout(deadline);
-      options.signal?.removeEventListener("abort", cancelFromCaller);
-    }
+    });
   }
 
   private cookieValue(name: string): string | undefined {
@@ -578,7 +524,7 @@ export class NowCoderPageClient {
   }
 
   private assertHtmlResponse(response: NowCoderHttpResponse, label: string): void {
-    const responseStatus = validHttpStatus(response.status);
+    const responseStatus = sanitizeHttpStatus(response.status);
     if (responseStatus === undefined) {
       throw new NowCoderAdapterError("upstream.unavailable", "NowCoder returned an invalid HTTP status.");
     }
@@ -897,19 +843,6 @@ function header(headers: Record<string, string>, name: string): string | undefin
   return entry?.[1];
 }
 
-function retryAfterMilliseconds(headers: Record<string, string>): number | undefined {
-  const value = header(headers, "retry-after");
-  if (!value) return undefined;
-  const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1_000, MAX_RETRY_AFTER_MS);
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? Math.min(MAX_RETRY_AFTER_MS, Math.max(0, timestamp - Date.now())) : undefined;
-}
-
-function validHttpStatus(status: number): number | undefined {
-  return Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined;
-}
-
 function validateSessionCookie(value: string): string {
   const normalized = value.trim();
   if (
@@ -920,30 +853,4 @@ function validateSessionCookie(value: string): string {
     throw new TypeError("NowCoder session cookie is invalid.");
   }
   return normalized;
-}
-
-function isTimeoutError(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  const candidate = error as { name?: unknown; code?: unknown; cause?: { code?: unknown } };
-  return candidate.name === "AbortError" || candidate.name === "TimeoutError" || candidate.code === "ETIMEDOUT"
-    || candidate.code === "UND_ERR_CONNECT_TIMEOUT" || candidate.cause?.code === "ETIMEDOUT";
-}
-
-function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason ?? new DOMException("Request aborted.", "AbortError"));
-  return new Promise<T>((resolve, reject) => {
-    let settled = false;
-    const finish = (callback: () => void): void => {
-      if (settled) return;
-      settled = true;
-      signal.removeEventListener("abort", onAbort);
-      callback();
-    };
-    const onAbort = () => finish(() => reject(signal.reason ?? new DOMException("Request aborted.", "AbortError")));
-    signal.addEventListener("abort", onAbort, { once: true });
-    operation.then(
-      (value) => finish(() => resolve(value)),
-      (error: unknown) => finish(() => reject(error))
-    );
-  });
 }

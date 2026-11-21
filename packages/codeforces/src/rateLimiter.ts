@@ -1,4 +1,5 @@
-import { abortable, BoundedAdmission } from "./admission.js";
+import { IntervalRateLimiter } from "@kaiserunix/oj-mcp-server-common";
+import { CodeforcesQueueFullError } from "./admission.js";
 
 export interface CodeforcesRateLimiterOptions {
   intervalMs?: number;
@@ -8,27 +9,22 @@ export interface CodeforcesRateLimiterOptions {
 }
 
 export class CodeforcesRateLimiter {
-  private readonly intervalMs: number;
-  private readonly now: () => number;
-  private readonly sleep: (milliseconds: number) => Promise<void>;
-  private readonly admission: BoundedAdmission;
-  private lastStartedAt?: number;
+  private readonly limiter: IntervalRateLimiter;
 
   constructor(options: CodeforcesRateLimiterOptions = {}) {
-    this.intervalMs = options.intervalMs ?? 2_000;
-    this.now = options.now ?? Date.now;
-    this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
-    this.admission = new BoundedAdmission(1, options.maxQueued ?? 32, "Codeforces client rate limiter");
+    this.limiter = new IntervalRateLimiter({
+      intervalMs: options.intervalMs ?? 2_000,
+      ...(options.now ? { now: options.now } : {}),
+      ...(options.sleep ? { sleep: options.sleep } : {}),
+      maxQueued: options.maxQueued ?? 32,
+      name: "Codeforces client rate limiter",
+      onOverload: () => {
+        throw new CodeforcesQueueFullError("Codeforces client rate limiter queue is full.");
+      }
+    });
   }
 
   schedule<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    return this.admission.run(signal, async () => {
-      if (this.lastStartedAt !== undefined) {
-        const remaining = this.intervalMs - (this.now() - this.lastStartedAt);
-        if (remaining > 0) await abortable(this.sleep(remaining), signal);
-      }
-      this.lastStartedAt = this.now();
-      return operation();
-    });
+    return this.limiter.schedule(operation, signal);
   }
 }

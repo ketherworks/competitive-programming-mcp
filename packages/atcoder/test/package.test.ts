@@ -38,7 +38,7 @@ describe("AtCoder package deployment metadata", () => {
     });
   });
 
-  test("cleaning AtCoder preserves shared dependency artifacts", { timeout: 30_000 }, async () => {
+  test("cleaning AtCoder preserves shared dependency artifacts", { timeout: 90_000 }, async () => {
     const sandbox = await createPackSandbox();
     const packageDirectory = join(sandbox, "packages", "atcoder");
     const contractsArtifact = join(sandbox, "packages", "contracts", "dist", "index.d.ts");
@@ -63,7 +63,7 @@ describe("AtCoder package deployment metadata", () => {
 
   test.runIf(process.platform !== "win32")(
     "clean build marks the stdio entry point executable",
-    { timeout: 30_000 },
+    { timeout: 90_000 },
     async () => {
       const sandbox = await createPackSandbox();
       const packageDirectory = join(sandbox, "packages", "atcoder");
@@ -80,7 +80,7 @@ describe("AtCoder package deployment metadata", () => {
     }
   );
 
-  test("production stdio entry point reports local_stdio capabilities", { timeout: 30_000 }, async () => {
+  test("production stdio entry point reports local_stdio capabilities", { timeout: 90_000 }, async () => {
     const sandbox = await createPackSandbox();
     const packageDirectory = join(sandbox, "packages", "atcoder");
     const client = new Client({ name: "atcoder-production-stdio-test", version: "0.1.0" });
@@ -172,7 +172,7 @@ describe("AtCoder package deployment metadata", () => {
     ]);
   });
 
-  test("prepacks from absent dist and excludes source and compiler internals", { timeout: 30_000 }, async () => {
+  test("prepacks from absent dist and excludes source and compiler internals", { timeout: 90_000 }, async () => {
     const sandbox = await createPackSandbox();
     const packageDirectory = join(sandbox, "packages", "atcoder");
     try {

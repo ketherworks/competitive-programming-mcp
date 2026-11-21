@@ -20,11 +20,23 @@ describe("parseHostConfig", () => {
     expect(() => parseHostConfig(["nowcoder"], {})).toThrow(/atcoder or luogu/i);
   });
 
-  test("fails closed on invalid ports and short internal keys", () => {
+  test("fails closed on invalid ports, null-byte hosts, and short internal keys", () => {
     expect(() => parseHostConfig(["luogu"], { OJ_MCP_PORT: "0" })).toThrow(/port/i);
+    expect(() => parseHostConfig(["luogu"], { OJ_MCP_PORT: "65536" })).toThrow(/port/i);
+    expect(() => parseHostConfig(["luogu"], { OJ_MCP_PORT: "abc" })).toThrow(/port/i);
+    expect(() => parseHostConfig(["luogu"], { OJ_MCP_HOST: "127.0.0.1\0evil" })).toThrow(/host/i);
     expect(() => parseHostConfig(["luogu"], { OJ_MCP_PORT: "39102", OJ_MCP_INTERNAL_KEY: "short" })).toThrow(
       /24 characters/i
     );
+  });
+
+  test("applies safe loopback defaults when optional environment variables are omitted", () => {
+    expect(parseHostConfig(["luogu"], {})).toEqual({
+      provider: "luogu",
+      host: "127.0.0.1",
+      port: 8787,
+      workerEnv: {}
+    });
   });
 });
 

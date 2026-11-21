@@ -1,6 +1,6 @@
 import { once } from "node:events";
 import { request } from "node:http";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { createNodeHttpServer, type WebWorker } from "../src/bridge.js";
 
 const servers: Array<ReturnType<typeof createNodeHttpServer>> = [];
@@ -102,6 +102,74 @@ describe("createNodeHttpServer", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect(observedSignal?.aborted).toBe(true);
+  });
+
+  test("strips x-oj-mcp-key before forwarding and handles bodyless 204 responses", async () => {
+    let forwardedKeyHeader: string | null = "untouched";
+    const server = createNodeHttpServer({
+      internalKey: "correct-horse-battery-staple",
+      worker: {
+        fetch: async (inbound) => {
+          forwardedKeyHeader = inbound.headers.get("x-oj-mcp-key");
+          return new Response(null, { status: 204 });
+        }
+      }
+    });
+    servers.push(server);
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Expected TCP address.");
+
+    const response = await send(address.port, "/mcp", {
+      method: "OPTIONS",
+      headers: { "x-oj-mcp-key": "correct-horse-battery-staple" }
+    });
+
+    expect(response.status).toBe(204);
+    expect(response.body).toBe("");
+    expect(forwardedKeyHeader).toBeNull();
+  });
+
+  test("rejects protocol-relative targets with 400 and sanitizes worker errors as 500", async () => {
+    let workerCalled = 0;
+    const server = createNodeHttpServer({
+      worker: {
+        fetch: async () => {
+          workerCalled += 1;
+          throw new Error("secret-stack-detail");
+        }
+      }
+    });
+    servers.push(server);
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Expected TCP address.");
+
+    const badTarget = await send(address.port, "//evil.example/mcp");
+    expect(badTarget.status).toBe(400);
+    expect(workerCalled).toBe(0);
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const workerFailure = await send(address.port, "/mcp");
+      expect(workerFailure.status).toBe(500);
+      expect(JSON.parse(workerFailure.body)).toEqual({ error: "Internal server error" });
+      expect(workerFailure.body).not.toContain("secret-stack-detail");
+      expect(stderrSpy).toHaveBeenCalled();
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  test("rejects short internalKey at server creation", () => {
+    expect(() =>
+      createNodeHttpServer({
+        worker: { fetch: async () => new Response("ok") },
+        internalKey: "too-short"
+      })
+    ).toThrow(/24 characters/i);
   });
 });
 
