@@ -1,7 +1,9 @@
 import { timingSafeEqual } from "node:crypto";
-import { createServer, type IncomingHttpHeaders, type Server, type ServerResponse } from "node:http";
+import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import { once } from "node:events";
+
+export const MIN_INTERNAL_KEY_LENGTH = 24;
 
 export interface WebWorker<Env = Record<string, never>> {
   fetch(request: Request, env: Env): Promise<Response>;
@@ -11,6 +13,13 @@ export interface NodeHttpServerOptions<Env> {
   worker: WebWorker<Env>;
   env?: Env;
   internalKey?: string;
+}
+
+class InvalidRequestTargetError extends TypeError {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidRequestTargetError";
+  }
 }
 
 export function createNodeHttpServer<Env = Record<string, never>>(options: NodeHttpServerOptions<Env>): Server {
@@ -39,6 +48,11 @@ export function createNodeHttpServer<Env = Record<string, never>>(options: NodeH
       await writeWebResponse(response, outgoing, abort.signal);
     } catch (error) {
       if (abort.signal.aborted || outgoing.destroyed) return;
+      if (error instanceof InvalidRequestTargetError) {
+        incoming.resume();
+        sendJson(outgoing, 400, { error: error.message });
+        return;
+      }
       sendJson(outgoing, 500, { error: "Internal server error" });
       process.stderr.write(`OJ MCP HTTP host request failed: ${error instanceof Error ? error.message : "unknown error"}\n`);
     } finally {
@@ -48,9 +62,11 @@ export function createNodeHttpServer<Env = Record<string, never>>(options: NodeH
   });
 }
 
-function toWebRequest(incoming: import("node:http").IncomingMessage, signal: AbortSignal): Request {
+function toWebRequest(incoming: IncomingMessage, signal: AbortSignal): Request {
   const target = incoming.url ?? "/";
-  if (!target.startsWith("/")) throw new TypeError("Only origin-form HTTP request targets are accepted.");
+  if (!target.startsWith("/") || target.startsWith("//") || /[\r\n\0]/.test(target)) {
+    throw new InvalidRequestTargetError("Only origin-form HTTP request targets are accepted.");
+  }
   const headers = toWebHeaders(incoming.headers);
   headers.delete("x-oj-mcp-key");
   headers.delete("connection");
@@ -58,7 +74,14 @@ function toWebRequest(incoming: import("node:http").IncomingMessage, signal: Abo
 
   const method = incoming.method ?? "GET";
   const hasBody = method !== "GET" && method !== "HEAD";
-  return new Request(`http://127.0.0.1${target}`, {
+  let requestUrl: string;
+  try {
+    requestUrl = new URL(target, "http://127.0.0.1").toString();
+  } catch {
+    throw new InvalidRequestTargetError("Only origin-form HTTP request targets are accepted.");
+  }
+
+  return new Request(requestUrl, {
     method,
     headers,
     signal,
@@ -105,13 +128,19 @@ async function writeWebResponse(response: Response, outgoing: ServerResponse, si
     if (!signal.aborted && !outgoing.destroyed) outgoing.end();
   } finally {
     signal.removeEventListener("abort", cancel);
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // Cleanup must not mask the stream outcome.
+    }
   }
 }
 
-function validateInternalKey(value: string | undefined): Buffer | undefined {
+export function validateInternalKey(value: string | undefined): Buffer | undefined {
   if (value === undefined) return undefined;
-  if (value.length < 24) throw new TypeError("OJ_MCP_INTERNAL_KEY must contain at least 24 characters.");
+  if (value.length < MIN_INTERNAL_KEY_LENGTH) {
+    throw new TypeError(`OJ_MCP_INTERNAL_KEY must contain at least ${MIN_INTERNAL_KEY_LENGTH} characters.`);
+  }
   return Buffer.from(value, "utf8");
 }
 

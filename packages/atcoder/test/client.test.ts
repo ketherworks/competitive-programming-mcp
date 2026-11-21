@@ -261,4 +261,19 @@ describe("AtCoderHtmlClient", () => {
     ).rejects.toThrow("locale");
     expect(requests).toBe(0);
   });
+
+  test("rejects invalid UTF-8 HTML responses as upstream schema drift", async () => {
+    const client = new AtCoderHtmlClient({
+      fetchImpl: async () =>
+        new Response(new Uint8Array([0xff, 0xfe]), {
+          status: 200,
+          headers: { "Content-Type": "text/html; charset=utf-8" }
+        })
+    });
+
+    await expect(client.fetchTask({ contestId: "abc086", taskId: "abc086_a", locale: "en" })).rejects.toMatchObject({
+      code: "upstream.schema_changed",
+      httpStatus: 200
+    });
+  });
 });

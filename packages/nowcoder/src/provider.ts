@@ -1,11 +1,11 @@
 import {
-  ojCapabilitiesSchema,
+  buildOjCapabilities,
+  defaultCapabilityRisk,
   ojProviderHealthSchema,
   ojSearchRequestSchema,
   type OjCapabilities,
   type OjCapability,
   type OjCapabilityName,
-  type OjOperationRisk,
   type OjProblemDocument,
   type OjProviderHealth,
   type OjImportPreview,
@@ -21,6 +21,7 @@ import {
   type OjRunResult,
   type OjSourceRef
 } from "@kaiserunix/oj-mcp-contracts";
+import { MonotonicHealthStore, type HealthObservation } from "@kaiserunix/oj-mcp-server-common";
 import { z } from "zod";
 import { authStatusMessage, nowCoderAuthStatusSchema, type NowCoderAuthStatus } from "./auth.js";
 import { NowCoderPageClient } from "./client.js";
@@ -63,19 +64,13 @@ export interface NowCoderProviderOptions {
   nowIso?: () => string;
 }
 
-interface HealthObservation {
-  checkedAt: string;
-  latencyMs: number;
-  error?: NowCoderAdapterError;
-}
-
 export class NowCoderProvider {
   private readonly client: NowCoderPageClient;
   private readonly importer: CompetitiveCompanionImporter;
   private readonly judge: NowCoderJudgeService;
   private readonly now: () => number;
   private readonly nowIso: () => string;
-  private observation?: HealthObservation;
+  private readonly healthStore = new MonotonicHealthStore<NowCoderAdapterError>();
 
   constructor(options: NowCoderProviderOptions = {}) {
     this.client = options.client ?? new NowCoderPageClient();
@@ -90,17 +85,17 @@ export class NowCoderProvider {
   }
 
   async fetchProblem(locator: NowCoderProblemLocator, options: { signal?: AbortSignal } = {}): Promise<OjProblemDocument> {
-    const startedAt = this.now();
+    let requestedUrl: string;
     try {
-      let requestedUrl: string;
-      try {
-        requestedUrl = resolveNowCoderProblemLocator(locator).canonicalUrl;
-      } catch {
-        throw new NowCoderAdapterError(
-          "request.invalid",
-          "Use one allowlisted NowCoder URL or nativeId NC<id> or <contest-id>/<index> in its documented field."
-        );
-      }
+      requestedUrl = resolveNowCoderProblemLocator(locator).canonicalUrl;
+    } catch {
+      throw new NowCoderAdapterError(
+        "request.invalid",
+        "Use one allowlisted NowCoder URL or nativeId NC<id> or <contest-id>/<index> in its documented field."
+      );
+    }
+
+    return this.observe(async () => {
       const page = await this.client.getProblemPage(requestedUrl, options);
       const fetchedAt = this.nowIso();
       let document: OjProblemDocument;
@@ -110,22 +105,11 @@ export class NowCoderProvider {
         if (error instanceof NowCoderAdapterError) throw error;
         throw new NowCoderAdapterError("upstream.schema_changed", "NowCoder problem HTML no longer matches the audited document schema.");
       }
-      this.observation = { checkedAt: fetchedAt, latencyMs: Math.max(0, this.now() - startedAt) };
-      return document;
-    } catch (error) {
-      if (error instanceof NowCoderAdapterError && affectsHealth(error.code)) {
-        this.observation = {
-          checkedAt: this.nowIso(),
-          latencyMs: Math.max(0, this.now() - startedAt),
-          error
-        };
-      }
-      throw error;
-    }
+      return { value: document, checkedAt: fetchedAt };
+    });
   }
 
   async search(input: OjSearchRequest, options: { signal?: AbortSignal } = {}): Promise<OjSearchResult> {
-    const startedAt = this.now();
     let request: z.infer<typeof nowCoderSearchInputSchema>;
     try {
       request = nowCoderSearchInputSchema.parse(input);
@@ -136,7 +120,7 @@ export class NowCoderProvider {
       );
     }
 
-    try {
+    return this.observe(async () => {
       const pageNumber = request.cursor === undefined ? 1 : Number(request.cursor);
       const page = await this.client.getProblemListPage({
         query: request.query,
@@ -151,18 +135,8 @@ export class NowCoderProvider {
         limit: request.limit,
         fetchedAt
       });
-      this.observation = { checkedAt: fetchedAt, latencyMs: Math.max(0, this.now() - startedAt) };
-      return result;
-    } catch (error) {
-      if (error instanceof NowCoderAdapterError && affectsHealth(error.code)) {
-        this.observation = {
-          checkedAt: this.nowIso(),
-          latencyMs: Math.max(0, this.now() - startedAt),
-          error
-        };
-      }
-      throw error;
-    }
+      return { value: result, checkedAt: fetchedAt };
+    });
   }
 
   async fetchProfile(
@@ -173,22 +147,16 @@ export class NowCoderProvider {
     if (!parsed.success) {
       throw new NowCoderAdapterError("request.invalid", "Use a positive numeric NowCoder accountId or omit it for the signed-in account.");
     }
-    const startedAt = this.now();
-    try {
+
+    return this.observe(async () => {
       const page = await this.client.getProfilePage(parsed.data.accountId, options);
       const fetchedAt = this.nowIso();
       const profile = nowCoderProfileSchema.parse(parseNowCoderProfileHtml(page.html, {
         accountId: page.accountId,
         fetchedAt
       }));
-      this.observation = { checkedAt: fetchedAt, latencyMs: Math.max(0, this.now() - startedAt) };
-      return profile;
-    } catch (error) {
-      if (error instanceof NowCoderAdapterError && affectsHealth(error.code)) {
-        this.observation = { checkedAt: this.nowIso(), latencyMs: Math.max(0, this.now() - startedAt), error };
-      }
-      throw error;
-    }
+      return { value: profile, checkedAt: fetchedAt };
+    });
   }
 
   async listSubmissions(
@@ -199,8 +167,8 @@ export class NowCoderProvider {
     if (!parsed.success) {
       throw new NowCoderAdapterError("request.invalid", "Use a valid accountId, optional query and page cursor, and limit 1-50.");
     }
-    const startedAt = this.now();
-    try {
+
+    return this.observe(async () => {
       const pageNumber = parsed.data.cursor === undefined ? 1 : Number(parsed.data.cursor);
       const page = await this.client.getSubmissionsPage({
         ...(parsed.data.accountId === undefined ? {} : { accountId: parsed.data.accountId }),
@@ -216,14 +184,8 @@ export class NowCoderProvider {
         sourceUrl: page.url,
         fetchedAt
       }));
-      this.observation = { checkedAt: fetchedAt, latencyMs: Math.max(0, this.now() - startedAt) };
-      return result;
-    } catch (error) {
-      if (error instanceof NowCoderAdapterError && affectsHealth(error.code)) {
-        this.observation = { checkedAt: this.nowIso(), latencyMs: Math.max(0, this.now() - startedAt), error };
-      }
-      throw error;
-    }
+      return { value: result, checkedAt: fetchedAt };
+    });
   }
 
   async getAuthStatus(options: { signal?: AbortSignal } = {}): Promise<NowCoderAuthStatus> {
@@ -293,23 +255,18 @@ export class NowCoderProvider {
   async getCapabilities(): Promise<OjCapabilities> {
     const checkedAt = this.nowIso();
     const hasSessionCookie = this.client.hasSessionCookie();
-    const operations = Object.fromEntries(
-      capabilityNames.map((name) => [name, capability(name, checkedAt, hasSessionCookie)])
-    ) as Record<OjCapabilityName, OjCapability>;
-    return ojCapabilitiesSchema.parse({
-      schemaVersion: "oj.capabilities/v1",
+    return buildOjCapabilities({
       providerId: PROVIDER_ID,
       providerVersion: PROVIDER_VERSION,
       platform: "nowcoder",
-      protocolVersion: "2025-11-25",
-      operations,
       languages: NOWCODER_JUDGE_LANGUAGES,
-      source: providerSource(checkedAt)
+      source: providerSource(checkedAt),
+      buildOperation: (name) => capability(name, checkedAt, hasSessionCookie)
     });
   }
 
   async getHealth(): Promise<OjProviderHealth> {
-    const observation = this.observation;
+    const observation = this.healthStore.snapshot();
     if (!observation) {
       return ojProviderHealthSchema.parse({
         schemaVersion: "oj.provider-health/v1",
@@ -335,20 +292,22 @@ export class NowCoderProvider {
     }
     return ojProviderHealthSchema.parse(healthFromError(observation));
   }
-}
 
-const capabilityNames: OjCapabilityName[] = [
-  "searchProblems",
-  "fetchProblem",
-  "importProblem",
-  "fetchProfile",
-  "listSubmissions",
-  "localRun",
-  "platformRun",
-  "prepareSubmission",
-  "commitSubmission",
-  "pollSubmission"
-];
+  private async observe<T>(operation: () => Promise<{ value: T; checkedAt: string }>): Promise<T> {
+    const sequence = this.healthStore.begin();
+    const startedAt = this.now();
+    try {
+      const { value, checkedAt } = await operation();
+      this.healthStore.recordSuccess(sequence, checkedAt, this.now() - startedAt);
+      return value;
+    } catch (error) {
+      if (error instanceof NowCoderAdapterError && affectsHealth(error.code)) {
+        this.healthStore.recordError(sequence, this.nowIso(), error, this.now() - startedAt);
+      }
+      throw error;
+    }
+  }
+}
 
 function capability(name: OjCapabilityName, checkedAt: string, hasSessionCookie: boolean): OjCapability {
   if (name === "fetchProblem" || name === "searchProblems") {
@@ -417,7 +376,7 @@ function capability(name: OjCapabilityName, checkedAt: string, hasSessionCookie:
       ...(available ? { toolName: name === "prepareSubmission" ? "oj_prepare_submission" : name === "commitSubmission" ? "oj_commit_submission" : "oj_poll_submission" } : {}),
       transport: "local_stdio",
       auth: "session_cookie",
-      risk: operationRisk(name),
+      risk: defaultCapabilityRisk(name),
       compliance: "unofficial",
       reason: available
         ? name === "prepareSubmission"
@@ -450,19 +409,11 @@ function capability(name: OjCapabilityName, checkedAt: string, hasSessionCookie:
     status: "unsupported",
     transport: "local_stdio",
     auth: "none",
-    risk: operationRisk(name),
+    risk: defaultCapabilityRisk(name),
     compliance: "unofficial",
     reason,
     checkedAt
   };
-}
-
-function operationRisk(name: OjCapabilityName): OjOperationRisk {
-  if (name === "commitSubmission") return "R4_real_submit";
-  if (name === "prepareSubmission") return "R3_prepare_write";
-  if (name === "localRun" || name === "platformRun") return "R2_local_execute";
-  if (name === "fetchProfile" || name === "listSubmissions" || name === "pollSubmission") return "R1_private_read";
-  return "R0_public_read";
 }
 
 function providerSource(fetchedAt: string): OjSourceRef {
@@ -489,7 +440,7 @@ function affectsHealth(code: NowCoderAdapterError["code"]): boolean {
   ].includes(code);
 }
 
-function healthFromError(observation: HealthObservation): OjProviderHealth {
+function healthFromError(observation: HealthObservation<NowCoderAdapterError>): OjProviderHealth {
   const error = observation.error!;
   const common = {
     schemaVersion: "oj.provider-health/v1" as const,

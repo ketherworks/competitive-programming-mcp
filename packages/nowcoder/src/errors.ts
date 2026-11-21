@@ -1,29 +1,26 @@
-import type { OjErrorCode } from "@kaiserunix/oj-mcp-contracts";
+import { OJ_MAX_RETRY_AFTER_MS, type OjErrorCode } from "@kaiserunix/oj-mcp-contracts";
+import { OjAdapterError } from "@kaiserunix/oj-mcp-server-common";
 
-export const MAX_RETRY_AFTER_MS = 24 * 60 * 60 * 1_000;
+export const MAX_RETRY_AFTER_MS = OJ_MAX_RETRY_AFTER_MS;
 
 export interface NowCoderErrorMetadata {
   httpStatus?: number;
   retryAfterMs?: number;
 }
 
-export class NowCoderAdapterError extends Error {
+export class NowCoderAdapterError extends OjAdapterError {
   readonly options: NowCoderErrorMetadata;
 
   constructor(
-    readonly code: OjErrorCode,
+    code: OjErrorCode,
     message: string,
     options: NowCoderErrorMetadata = {}
   ) {
-    super(message);
+    super(code, message, options);
     this.name = "NowCoderAdapterError";
     this.options = Object.freeze({
-      ...(Number.isInteger(options.httpStatus) && options.httpStatus! >= 100 && options.httpStatus! <= 599
-        ? { httpStatus: options.httpStatus }
-        : {}),
-      ...(Number.isFinite(options.retryAfterMs) && options.retryAfterMs! >= 0
-        ? { retryAfterMs: Math.min(options.retryAfterMs!, MAX_RETRY_AFTER_MS) }
-        : {})
+      ...(this.httpStatus !== undefined ? { httpStatus: this.httpStatus } : {}),
+      ...(this.retryAfterMs !== undefined ? { retryAfterMs: this.retryAfterMs } : {})
     });
   }
 }

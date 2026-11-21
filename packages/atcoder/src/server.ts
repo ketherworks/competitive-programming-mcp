@@ -6,6 +6,7 @@ import {
   type Tool
 } from "@modelcontextprotocol/sdk/types.js";
 import {
+  createOjError,
   ojCapabilitiesSchema,
   ojProblemDocumentSchema,
   ojProviderHealthSchema,
@@ -13,7 +14,14 @@ import {
   type OjCapability,
   type OjError
 } from "@kaiserunix/oj-mcp-contracts";
-import { toOjToolOutputSchema, toToolError, toToolResult } from "@kaiserunix/oj-mcp-server-common";
+import {
+  defineOjTool,
+  executeOjToolCall,
+  parseStrictToolInput,
+  strictEmptyInputSchema,
+  toNormalizedToolError,
+  type OjErrorNormalizerOptions
+} from "@kaiserunix/oj-mcp-server-common";
 import { z } from "zod";
 import { AtCoderClientError } from "./client.js";
 import {
@@ -24,12 +32,57 @@ import {
 
 export const ATCODER_MCP_TOOL_NAMES = ["oj_capabilities", "oj_health", "oj_fetch_problem", "oj_search_problems"] as const;
 
-const emptyInputSchema = z.object({}).strict();
-
 export interface AtCoderMcpServerOptions {
   provider?: AtCoderProvider;
   transport: OjCapability["transport"];
 }
+
+const errorNormalizer: OjErrorNormalizerOptions = {
+  platform: "atcoder",
+  providerId: "atcoder-page-adapter",
+  internalMessage: "AtCoder provider failed.",
+  resolveLayer: (error) => {
+    if (error.code === "policy.blocked") return "policy";
+    if (error.code === "network.timeout") return "transport";
+    if (error.code === "request.invalid") return "protocol";
+    if (error.code === "challenge.required") return "auth";
+    if (error.code === "resource.not_found" || error.code === "rate_limited" || error.code.startsWith("upstream.")) {
+      return "upstream";
+    }
+    return "broker";
+  },
+  resolveRetryPolicy: (error): OjError["retryPolicy"] =>
+    error.code === "rate_limited" ||
+    error.code === "network.timeout" ||
+    error.code === "upstream.unavailable" ||
+    error.code === "challenge.required"
+      ? "safe_read"
+      : "never",
+  resolveUserAction: (error): OjError["userAction"] => {
+    if (
+      error.code === "rate_limited" ||
+      error.code === "network.timeout" ||
+      error.code === "upstream.unavailable" ||
+      error.code === "challenge.required"
+    ) {
+      return "retry";
+    }
+    if (error.code === "upstream.schema_changed" || error.code === "internal") return "open_logs";
+    return "none";
+  },
+  mapUnknownError: (caught) =>
+    caught instanceof z.ZodError
+      ? createOjError({
+          code: "request.invalid",
+          layer: "protocol",
+          message: "AtCoder request failed schema validation.",
+          retryPolicy: "never",
+          userAction: "none",
+          platform: "atcoder",
+          providerId: "atcoder-page-adapter"
+        })
+      : undefined
+};
 
 export function createAtCoderMcpServer(options: AtCoderMcpServerOptions): Server {
   const provider = options.provider ?? new AtCoderProvider();
@@ -43,15 +96,28 @@ export function createAtCoderMcpServer(options: AtCoderMcpServerOptions): Server
     const input = request.params.arguments ?? {};
     switch (request.params.name) {
       case "oj_capabilities":
-        return callSafely(emptyInputSchema, input, () => provider.getCapabilities(options.transport));
+        return callWithSchema(strictEmptyInputSchema, input, () => provider.getCapabilities(options.transport), extra.signal);
       case "oj_health":
-        return callSafely(emptyInputSchema, input, () => provider.getHealth());
+        return callWithSchema(strictEmptyInputSchema, input, () => provider.getHealth(), extra.signal);
       case "oj_fetch_problem":
-        return callSafely(atCoderFetchProblemInputSchema, input, (parsed) => provider.fetchProblem(parsed, extra.signal));
+        return callWithSchema(
+          atCoderFetchProblemInputSchema,
+          input,
+          (parsed) => provider.fetchProblem(parsed, extra.signal),
+          extra.signal
+        );
       case "oj_search_problems":
-        return callSafely(atCoderSearchInputSchema, input, (parsed) => provider.search(parsed, extra.signal));
+        return callWithSchema(
+          atCoderSearchInputSchema,
+          input,
+          (parsed) => provider.search(parsed, extra.signal),
+          extra.signal
+        );
       default:
-        return mapError(new AtCoderClientError("request.invalid", `Unknown AtCoder tool '${request.params.name}'.`));
+        return toNormalizedToolError(
+          new AtCoderClientError("request.invalid", `Unknown AtCoder tool '${request.params.name}'.`),
+          errorNormalizer
+        );
     }
   });
 
@@ -60,141 +126,63 @@ export function createAtCoderMcpServer(options: AtCoderMcpServerOptions): Server
 
 function toolDefinitions(): Tool[] {
   return [
-    {
+    defineOjTool({
       name: "oj_capabilities",
       title: "AtCoder Provider Capabilities",
       description: "Report the audited anonymous AtCoder read surface and explicitly unsupported operations.",
-      inputSchema: jsonObjectSchema(emptyInputSchema),
-      outputSchema: ojOutputSchema(ojCapabilitiesSchema),
-      annotations: readAnnotations(false)
-    },
-    {
+      inputSchema: strictEmptyInputSchema,
+      outputSchema: ojCapabilitiesSchema,
+      openWorldHint: false,
+      inputSchemaTarget: "draft-2020-12"
+    }),
+    defineOjTool({
       name: "oj_health",
       title: "AtCoder Provider Health",
       description: "Report local readiness and the latest observed AtCoder page-read status without probing upstream.",
-      inputSchema: jsonObjectSchema(emptyInputSchema),
-      outputSchema: ojOutputSchema(ojProviderHealthSchema),
-      annotations: readAnnotations(false)
-    },
-    {
+      inputSchema: strictEmptyInputSchema,
+      outputSchema: ojProviderHealthSchema,
+      openWorldHint: false,
+      inputSchemaTarget: "draft-2020-12"
+    }),
+    defineOjTool({
       name: "oj_fetch_problem",
       title: "Fetch AtCoder Problem",
       description:
         "Fetch one public problem statement from an exact contest/task pair or canonical atcoder.jp task URL. Returns sanitized HTML with preserved math, samples, limits, hashes, and source provenance.",
-      inputSchema: jsonObjectSchema(atCoderFetchProblemInputSchema),
-      outputSchema: ojOutputSchema(ojProblemDocumentSchema),
-      annotations: readAnnotations(true)
-    },
-    {
+      inputSchema: atCoderFetchProblemInputSchema,
+      outputSchema: ojProblemDocumentSchema,
+      openWorldHint: true,
+      inputSchemaTarget: "draft-2020-12"
+    }),
+    defineOjTool({
       name: "oj_search_problems",
       title: "Find Exact AtCoder Problem",
       description:
         "Resolve exactly one contest/task id, atcoder:contest/task id, or canonical task URL. Free-text and catalog crawling are not supported.",
-      inputSchema: jsonObjectSchema(atCoderSearchInputSchema),
-      outputSchema: ojOutputSchema(ojSearchResultSchema),
-      annotations: readAnnotations(true)
-    }
+      inputSchema: atCoderSearchInputSchema,
+      outputSchema: ojSearchResultSchema,
+      openWorldHint: true,
+      inputSchemaTarget: "draft-2020-12"
+    })
   ];
 }
 
-function jsonObjectSchema(schema: z.ZodType): Tool["inputSchema"] {
-  return { type: "object", ...z.toJSONSchema(schema, { target: "draft-2020-12" }) } as Tool["inputSchema"];
-}
-
-function ojOutputSchema(schema: z.ZodType): NonNullable<Tool["outputSchema"]> {
-  return toOjToolOutputSchema(schema) as NonNullable<Tool["outputSchema"]>;
-}
-
-async function callSafely<T>(
+function callWithSchema<T>(
   schema: z.ZodType<T>,
   input: unknown,
-  operation: (parsed: T) => Promise<object>
+  operation: (parsed: T) => Promise<object>,
+  signal?: AbortSignal
 ): Promise<CallToolResult> {
-  const parsed = schema.safeParse(input);
-  if (!parsed.success) {
-    return mapError(
-      new AtCoderClientError(
-        "request.invalid",
-        parsed.error.issues.map((issue) => `${issue.path.join(".") || "arguments"}: ${issue.message}`).join(" ")
-      )
-    );
-  }
-  try {
-    return toToolResult((await operation(parsed.data)) as Record<string, unknown>);
-  } catch (caught) {
-    return mapError(caught);
-  }
-}
-
-function mapError(caught: unknown): CallToolResult {
-  if (caught instanceof AtCoderClientError) {
-    return toToolError(
-      ojError(
-        caught.code,
-        caught.message,
-        retryPolicy(caught.code),
-        userAction(caught.code),
-        caught.httpStatus,
-        caught.retryAfterMs
-      )
-    );
-  }
-  if (caught instanceof z.ZodError) {
-    return toToolError(ojError("request.invalid", "AtCoder request failed schema validation.", "never", "none"));
-  }
-  return toToolError(ojError("internal", "AtCoder provider failed.", "never", "open_logs"));
-}
-
-function ojError(
-  code: OjError["code"],
-  message: string,
-  retryPolicyValue: OjError["retryPolicy"],
-  userActionValue: OjError["userAction"],
-  httpStatus?: number,
-  retryAfterMs?: number
-): OjError {
-  return {
-    schemaVersion: "oj.error/v1",
-    code,
-    layer: errorLayer(code),
-    message,
-    retryPolicy: retryPolicyValue,
-    userAction: userActionValue,
-    platform: "atcoder",
-    providerId: "atcoder-page-adapter",
-    ...(httpStatus !== undefined ? { httpStatus } : {}),
-    ...(retryAfterMs !== undefined ? { retryAfterMs } : {})
-  };
-}
-
-function errorLayer(code: OjError["code"]): OjError["layer"] {
-  if (code === "policy.blocked") return "policy";
-  if (code === "network.timeout") return "transport";
-  if (code === "request.invalid") return "protocol";
-  if (code === "challenge.required") return "auth";
-  if (code === "resource.not_found" || code === "rate_limited" || code.startsWith("upstream.")) return "upstream";
-  return "broker";
-}
-
-function retryPolicy(code: OjError["code"]): OjError["retryPolicy"] {
-  return code === "rate_limited" || code === "network.timeout" || code === "upstream.unavailable" || code === "challenge.required"
-    ? "safe_read"
-    : "never";
-}
-
-function userAction(code: OjError["code"]): OjError["userAction"] {
-  if (code === "rate_limited" || code === "network.timeout" || code === "upstream.unavailable" || code === "challenge.required") {
-    return "retry";
-  }
-  if (code === "upstream.schema_changed" || code === "internal") return "open_logs";
-  return "none";
-}
-
-function readAnnotations(openWorldHint: boolean) {
-  return {
-    readOnlyHint: true,
-    destructiveHint: false,
-    idempotentHint: true,
-    openWorldHint
-  } as const;
+  return executeOjToolCall(
+    async () => {
+      const parsed = parseStrictToolInput(schema, input, (error) => {
+        throw new AtCoderClientError(
+          "request.invalid",
+          error.issues.map((issue) => `${issue.path.join(".") || "arguments"}: ${issue.message}`).join(" ")
+        );
+      });
+      return operation(parsed);
+    },
+    { errorNormalizer, signal }
+  );
 }

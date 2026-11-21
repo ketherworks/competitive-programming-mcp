@@ -8,7 +8,11 @@ import type {
   OjSearchResult,
   OjSourceRef
 } from "@kaiserunix/oj-mcp-contracts";
-import { ojCapabilitiesSchema, ojProviderHealthSchema, ojSearchResultSchema } from "@kaiserunix/oj-mcp-contracts";
+import {
+  buildOjCapabilities,
+  ojProviderHealthSchema,
+  ojSearchResultSchema
+} from "@kaiserunix/oj-mcp-contracts";
 import { z } from "zod";
 import { CodeforcesApiClient, CodeforcesApiError, CodeforcesRequestCancelledError } from "./client.js";
 import { normalizeCodeforcesProblemset, searchCodeforcesProblems } from "./normalizers.js";
@@ -82,18 +86,13 @@ export class CodeforcesProvider {
   }
 
   async getCapabilities(transport: OjCapability["transport"]): Promise<OjCapabilities> {
-    const operations = Object.fromEntries(
-      capabilityNames.map((name) => [name, capability(name, this.nowIso(), transport)])
-    ) as Record<OjCapabilityName, OjCapability>;
-    return ojCapabilitiesSchema.parse({
-      schemaVersion: "oj.capabilities/v1",
+    const checkedAt = this.nowIso();
+    return buildOjCapabilities({
       providerId: "codeforces-official-api",
       providerVersion: "0.1.0",
       platform: "codeforces",
-      protocolVersion: "2025-11-25",
-      operations,
-      languages: [],
-      source: source(this.nowIso())
+      source: source(checkedAt),
+      buildOperation: (name) => capability(name, checkedAt, transport)
     });
   }
 
@@ -164,19 +163,6 @@ export class CodeforcesProvider {
     return loading;
   }
 }
-
-const capabilityNames: OjCapabilityName[] = [
-  "searchProblems",
-  "fetchProblem",
-  "importProblem",
-  "fetchProfile",
-  "listSubmissions",
-  "localRun",
-  "platformRun",
-  "prepareSubmission",
-  "commitSubmission",
-  "pollSubmission"
-];
 
 function capability(name: OjCapabilityName, checkedAt: string, transport: OjCapability["transport"]): OjCapability {
   if (name === "searchProblems") {

@@ -1,3 +1,13 @@
+import {
+  BoundedBodyError,
+  cancelResponseBody,
+  createLinkedTimeoutSignal,
+  isTimeoutError,
+  OjAdapterError,
+  parseRetryAfterMs,
+  readBoundedResponseText
+} from "@kaiserunix/oj-mcp-server-common";
+
 export type AtCoderLocale = "en" | "ja";
 
 export interface AtCoderTaskLocator {
@@ -34,15 +44,17 @@ export type AtCoderClientErrorCode =
 
 export type AtCoderTransportCause = "consumer_cancelled" | "timeout";
 
-export class AtCoderClientError extends Error {
+export class AtCoderClientError extends OjAdapterError {
+  declare readonly code: AtCoderClientErrorCode;
+
   constructor(
-    readonly code: AtCoderClientErrorCode,
+    code: AtCoderClientErrorCode,
     message: string,
-    readonly httpStatus?: number,
-    readonly retryAfterMs?: number,
+    httpStatus?: number,
+    retryAfterMs?: number,
     readonly transportCause?: AtCoderTransportCause
   ) {
-    super(message);
+    super(code, message, { httpStatus, retryAfterMs });
     this.name = "AtCoderClientError";
   }
 }
@@ -104,26 +116,18 @@ export class AtCoderHtmlClient {
 
     const canonicalUrl = `https://atcoder.jp/contests/${locator.contestId}/tasks/${locator.taskId}`;
     let sourceUrl = `${canonicalUrl}?lang=${locator.locale}`;
-    const controller = new AbortController();
-    let timedOut = false;
-    const abortFromCaller = () =>
-      controller.abort(callerSignal?.reason ?? new DOMException("AtCoder request was cancelled.", "AbortError"));
-    if (callerSignal?.aborted) abortFromCaller();
-    else callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
-    const timer = setTimeout(
-      () => {
-        timedOut = true;
-        controller.abort(new DOMException("AtCoder request timed out.", "TimeoutError"));
-      },
-      this.timeoutMs
-    );
+    const abort = createLinkedTimeoutSignal(callerSignal, this.timeoutMs, {
+      timeoutMessage: "AtCoder request timed out.",
+      cancelMessage: "AtCoder request was cancelled."
+    });
+
     try {
       let response: Response | undefined;
       for (let redirectCount = 0; redirectCount <= 2; redirectCount += 1) {
         response = await this.fetchImpl(sourceUrl, {
           method: "GET",
           redirect: "manual",
-          signal: controller.signal,
+          signal: abort.signal,
           headers: {
             Accept: "text/html",
             "User-Agent": "oj-mcp-atcoder/0.1.0"
@@ -132,7 +136,7 @@ export class AtCoderHtmlClient {
         if (response.status < 300 || response.status >= 400) break;
 
         const location = response.headers.get("location");
-        await cancelResponseBody(response);
+        cancelResponseBody(response);
         if (!location) {
           throw new AtCoderClientError("upstream.unavailable", "AtCoder returned a redirect without a Location header.", response.status);
         }
@@ -160,12 +164,12 @@ export class AtCoderHtmlClient {
       }
 
       if (response.status === 404) {
-        await cancelResponseBody(response);
+        cancelResponseBody(response);
         throw new AtCoderClientError("resource.not_found", `AtCoder task ${locator.contestId}/${locator.taskId} was not found.`, 404);
       }
       if (response.status === 429) {
-        const retryAfterMs = retryAfterMilliseconds(response.headers.get("retry-after"));
-        await cancelResponseBody(response);
+        const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+        cancelResponseBody(response);
         throw new AtCoderClientError(
           "rate_limited",
           "AtCoder rate limited this anonymous read. Retry after the reported delay.",
@@ -174,7 +178,7 @@ export class AtCoderHtmlClient {
         );
       }
       if (response.status === 401 || response.status === 403) {
-        await cancelResponseBody(response);
+        cancelResponseBody(response);
         throw new AtCoderClientError(
           "challenge.required",
           "AtCoder blocked the anonymous page request; retry later rather than supplying credentials.",
@@ -182,20 +186,41 @@ export class AtCoderHtmlClient {
         );
       }
       if (!response.ok) {
-        await cancelResponseBody(response);
+        cancelResponseBody(response);
         throw new AtCoderClientError("upstream.unavailable", `AtCoder returned HTTP ${response.status}.`, response.status);
       }
       if (!(response.headers.get("content-type") ?? "").toLowerCase().startsWith("text/html")) {
-        await cancelResponseBody(response);
+        cancelResponseBody(response);
         throw new AtCoderClientError("upstream.schema_changed", "AtCoder returned a non-HTML task response.", response.status);
       }
-      const declaredBytes = Number(response.headers.get("content-length"));
-      if (Number.isFinite(declaredBytes) && declaredBytes > this.maxResponseBytes) {
-        await cancelResponseBody(response);
-        throw new AtCoderClientError("upstream.unavailable", "AtCoder HTML exceeded the configured response size limit.", response.status);
+
+      let html: string;
+      try {
+        html = await readBoundedResponseText(response, {
+          maxBytes: this.maxResponseBytes,
+          signal: abort.signal,
+          fatal: true
+        });
+      } catch (caught) {
+        if (caught instanceof BoundedBodyError) {
+          if (caught.reason === "too_large") {
+            throw new AtCoderClientError(
+              "upstream.unavailable",
+              "AtCoder HTML exceeded the configured response size limit.",
+              response.status
+            );
+          }
+          if (caught.reason === "invalid_utf8") {
+            throw new AtCoderClientError(
+              "upstream.schema_changed",
+              "AtCoder returned HTML that was not valid UTF-8.",
+              response.status
+            );
+          }
+        }
+        throw caught;
       }
 
-      const html = await readUtf8Body(response, this.maxResponseBytes);
       const etag = response.headers.get("etag");
       return {
         ...locator,
@@ -206,8 +231,8 @@ export class AtCoderHtmlClient {
       };
     } catch (error) {
       if (error instanceof AtCoderClientError) throw error;
-      if (controller.signal.aborted || isTimeoutError(error)) {
-        const transportCause: AtCoderTransportCause = timedOut || !callerSignal?.aborted ? "timeout" : "consumer_cancelled";
+      if (abort.signal.aborted || isTimeoutError(error)) {
+        const transportCause: AtCoderTransportCause = abort.didTimeout() || !callerSignal?.aborted ? "timeout" : "consumer_cancelled";
         throw new AtCoderClientError(
           "network.timeout",
           transportCause === "timeout" ? "AtCoder did not respond before the request timeout." : "The AtCoder request was cancelled.",
@@ -221,78 +246,7 @@ export class AtCoderHtmlClient {
         error instanceof Error ? `AtCoder request failed: ${error.message}` : "AtCoder request failed."
       );
     } finally {
-      clearTimeout(timer);
-      callerSignal?.removeEventListener("abort", abortFromCaller);
+      abort.dispose();
     }
   }
-}
-
-async function readUtf8Body(response: Response, maxResponseBytes: number): Promise<string> {
-  if (!response.body) return "";
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let totalBytes = 0;
-  let consumed = false;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        consumed = true;
-        break;
-      }
-      totalBytes += value.byteLength;
-      if (totalBytes > maxResponseBytes) {
-        throw new AtCoderClientError("upstream.unavailable", "AtCoder HTML exceeded the configured response size limit.", response.status);
-      }
-      chunks.push(value);
-    }
-  } finally {
-    if (!consumed) {
-      try {
-        await reader.cancel();
-      } catch {
-        // Preserve the transport or size error that interrupted body consumption.
-      }
-    }
-  }
-
-  const bytes = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    throw new AtCoderClientError("upstream.schema_changed", "AtCoder returned HTML that was not valid UTF-8.", response.status);
-  }
-}
-
-async function cancelResponseBody(response: Response): Promise<void> {
-  if (!response.body || response.body.locked) return;
-  try {
-    await response.body.cancel();
-  } catch {
-    // The mapped response error is more useful than a disposal failure.
-  }
-}
-
-function retryAfterMilliseconds(value: string | null): number | undefined {
-  if (!value) return undefined;
-  const seconds = Number(value);
-  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1_000 : undefined;
-}
-
-function isTimeoutError(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  const candidate = error as { name?: unknown; code?: unknown; cause?: { code?: unknown } };
-  return (
-    candidate.name === "TimeoutError" ||
-    candidate.name === "AbortError" ||
-    candidate.code === "ETIMEDOUT" ||
-    candidate.code === "UND_ERR_CONNECT_TIMEOUT" ||
-    candidate.cause?.code === "ETIMEDOUT" ||
-    candidate.cause?.code === "UND_ERR_CONNECT_TIMEOUT"
-  );
 }

@@ -4,6 +4,7 @@ import {
   type OjSourceRef,
   type OjTextBlock
 } from "@kaiserunix/oj-mcp-contracts";
+import { sha256Hex } from "@kaiserunix/oj-mcp-server-common";
 import { AtCoderClientError, type AtCoderHtmlPage, type AtCoderLocale } from "./client.js";
 import {
   findAll,
@@ -75,7 +76,7 @@ export async function parseAtCoderProblem(
   const statementSection = sections.find((section) => labels.statement.test(section.label));
   if (!statementSection) throw drift(`AtCoder ${page.locale} statement is missing its problem statement section.`);
 
-  const rawSha256 = await sha256(page.html);
+  const rawSha256 = await sha256Hex(page.html);
   const source: OjSourceRef = {
     kind: "page_adapter",
     adapterId: "atcoder-page-adapter",
@@ -154,7 +155,7 @@ async function textBlock(section: SectionEntry, locale: AtCoderLocale, baseUrl: 
     format: "html",
     locale,
     truncated: false,
-    sha256: await sha256(sanitized.html)
+    sha256: await sha256Hex(sanitized.html)
   };
 }
 
@@ -304,11 +305,6 @@ function localizedLabels(locale: AtCoderLocale) {
         sampleInput: /^Sample Input\s*([1-9][0-9]*)$/i,
         sampleOutput: /^Sample Output\s*([1-9][0-9]*)$/i
       };
-}
-
-async function sha256(value: string): Promise<string> {
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function drift(message: string): AtCoderClientError {
